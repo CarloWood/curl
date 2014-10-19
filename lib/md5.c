@@ -20,7 +20,7 @@
  *
  ***************************************************************************/
 
-#include "setup.h"
+#include "curl_setup.h"
 
 #ifndef CURL_DISABLE_CRYPTO_AUTH
 
@@ -28,9 +28,13 @@
 #include "curl_hmac.h"
 #include "warnless.h"
 
+#include "curl_memory.h"
+
 #if defined(USE_GNUTLS_NETTLE)
 
 #include <nettle/md5.h>
+/* The last #include file should be: */
+#include "memdebug.h"
 
 typedef struct md5_ctx MD5_CTX;
 
@@ -54,6 +58,8 @@ static void MD5_Final(unsigned char digest[16], MD5_CTX * ctx)
 #elif defined(USE_GNUTLS)
 
 #include <gcrypt.h>
+/* The last #include file should be: */
+#include "memdebug.h"
 
 typedef gcry_md_hd_t MD5_CTX;
 
@@ -84,6 +90,37 @@ static void MD5_Final(unsigned char digest[16], MD5_CTX * ctx)
 #    include <md5.h>
 #  endif
 
+#elif (defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && \
+              (__MAC_OS_X_VERSION_MAX_ALLOWED >= 1040)) || \
+      (defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && \
+              (__IPHONE_OS_VERSION_MAX_ALLOWED >= 20000))
+
+/* For Apple operating systems: CommonCrypto has the functions we need.
+   These functions are available on Tiger and later, as well as iOS 2.0
+   and later. If you're building for an older cat, well, sorry.
+
+   Declaring the functions as static like this seems to be a bit more
+   reliable than defining COMMON_DIGEST_FOR_OPENSSL on older cats. */
+#  include <CommonCrypto/CommonDigest.h>
+#  define MD5_CTX CC_MD5_CTX
+
+static void MD5_Init(MD5_CTX *ctx)
+{
+  CC_MD5_Init(ctx);
+}
+
+static void MD5_Update(MD5_CTX *ctx,
+                       const unsigned char *input,
+                       unsigned int inputLen)
+{
+  CC_MD5_Update(ctx, input, inputLen);
+}
+
+static void MD5_Final(unsigned char digest[16], MD5_CTX *ctx)
+{
+  CC_MD5_Final(digest, ctx);
+}
+
 #elif defined(_WIN32)
 
 #include <wincrypt.h>
@@ -110,7 +147,7 @@ static void MD5_Update(MD5_CTX *ctx,
 
 static void MD5_Final(unsigned char digest[16], MD5_CTX *ctx)
 {
-  unsigned long length;
+  unsigned long length = 0;
   CryptGetHashParam(ctx->hHash, HP_HASHVAL, NULL, &length, 0);
   if(length == 16)
     CryptGetHashParam(ctx->hHash, HP_HASHVAL, digest, &length, 0);
@@ -424,6 +461,9 @@ static void Decode (UINT4 *output,
 }
 
 #endif /* CRYPTO LIBS */
+
+/* The last #include file should be: */
+#include "memdebug.h"
 
 const HMAC_params Curl_HMAC_MD5[] = {
   {

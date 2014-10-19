@@ -5,7 +5,7 @@ function(SETUP_TEST TEST_NAME)          # ARGN are the files in the test
   string(TOUPPER ${TEST_NAME} UPPER_TEST_NAME)
 
   include_directories(
-    ${CURL_SOURCE_DIR}/lib          # To be able to reach "setup_once.h"
+    ${CURL_SOURCE_DIR}/lib          # To be able to reach "curl_setup_once.h"
     ${CURL_BINARY_DIR}/lib          # To be able to reach "curl_config.h"
     ${CURL_BINARY_DIR}/include      # To be able to reach "curl/curlbuild.h"
     )
@@ -24,14 +24,6 @@ function(SETUP_TEST TEST_NAME)          # ARGN are the files in the test
   # not added automatically as for modules and shared libraries
   set_target_properties(${TEST_NAME}
     PROPERTIES DEBUG_POSTFIX "${CMAKE_DEBUG_POSTFIX}")
-
-  if(MSVC)
-    if(NOT BUILD_RELEASE_DEBUG_DIRS)
-      # Ugly workaround to remove the "/debug" or "/release" in each output
-      set_target_properties(${TEST_NAME} PROPERTIES PREFIX "../")
-      set_target_properties(${TEST_NAME} PROPERTIES IMPORT_PREFIX "../")
-    endif()
-  endif()
 
 endfunction()
 

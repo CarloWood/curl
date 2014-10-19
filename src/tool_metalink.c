@@ -5,7 +5,7 @@
  *                            | (__| |_| |  _ <| |___
  *                             \___|\___/|_| \_\_____|
  *
- * Copyright (C) 1998 - 2012, Daniel Stenberg, <daniel@haxx.se>, et al.
+ * Copyright (C) 1998 - 2014, Daniel Stenberg, <daniel@haxx.se>, et al.
  *
  * This software is licensed as described in the file COPYING, which
  * you should have received as part of this distribution. The terms
@@ -22,10 +22,6 @@
 #include "tool_setup.h"
 
 #ifdef USE_METALINK
-
-#ifdef HAVE_UNISTD_H
-#  include <unistd.h>
-#endif
 
 #include <sys/stat.h>
 
@@ -52,12 +48,29 @@
 #  define MD5_CTX    gcry_md_hd_t
 #  define SHA_CTX    gcry_md_hd_t
 #  define SHA256_CTX gcry_md_hd_t
-#elif defined(USE_DARWINSSL)
-/* For darwinssl: CommonCrypto has the functions we need. The library's
-   headers are even backward-compatible with OpenSSL's headers as long as
-   we define COMMON_DIGEST_FOR_OPENSSL first.
+#elif defined(USE_NSS)
+#  include <nss.h>
+#  include <pk11pub.h>
+#  define MD5_CTX    void *
+#  define SHA_CTX    void *
+#  define SHA256_CTX void *
+   static NSSInitContext *nss_context;
+#elif defined(USE_POLARSSL)
+#  include <polarssl/md5.h>
+#  include <polarssl/sha1.h>
+#  include <polarssl/sha256.h>
+#  define MD5_CTX    md5_context
+#  define SHA_CTX    sha1_context
+#  define SHA256_CTX sha256_context
+#elif (defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && \
+              (__MAC_OS_X_VERSION_MAX_ALLOWED >= 1040)) || \
+      (defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && \
+              (__IPHONE_OS_VERSION_MAX_ALLOWED >= 20000))
+/* For Apple operating systems: CommonCrypto has the functions we need.
+   The library's headers are even backward-compatible with OpenSSL's
+   headers as long as we define COMMON_DIGEST_FOR_OPENSSL first.
 
-   These functions are available on Tiger and later, as well as iOS 5.0
+   These functions are available on Tiger and later, as well as iOS 2.0
    and later. If you're building for an older cat, well, sorry. */
 #  define COMMON_DIGEST_FOR_OPENSSL
 #  include <CommonCrypto/CommonDigest.h>
@@ -112,9 +125,10 @@ struct win32_crypto_hash {
 
 #ifdef USE_GNUTLS_NETTLE
 
-static void MD5_Init(MD5_CTX *ctx)
+static int MD5_Init(MD5_CTX *ctx)
 {
   md5_init(ctx);
+  return 1;
 }
 
 static void MD5_Update(MD5_CTX *ctx,
@@ -129,9 +143,10 @@ static void MD5_Final(unsigned char digest[16], MD5_CTX *ctx)
   md5_digest(ctx, 16, digest);
 }
 
-static void SHA1_Init(SHA_CTX *ctx)
+static int SHA1_Init(SHA_CTX *ctx)
 {
   sha1_init(ctx);
+  return 1;
 }
 
 static void SHA1_Update(SHA_CTX *ctx,
@@ -146,9 +161,10 @@ static void SHA1_Final(unsigned char digest[20], SHA_CTX *ctx)
   sha1_digest(ctx, 20, digest);
 }
 
-static void SHA256_Init(SHA256_CTX *ctx)
+static int SHA256_Init(SHA256_CTX *ctx)
 {
   sha256_init(ctx);
+  return 1;
 }
 
 static void SHA256_Update(SHA256_CTX *ctx,
@@ -165,9 +181,10 @@ static void SHA256_Final(unsigned char digest[32], SHA256_CTX *ctx)
 
 #elif defined(USE_GNUTLS)
 
-static void MD5_Init(MD5_CTX *ctx)
+static int MD5_Init(MD5_CTX *ctx)
 {
   gcry_md_open(ctx, GCRY_MD_MD5, 0);
+  return 1;
 }
 
 static void MD5_Update(MD5_CTX *ctx,
@@ -183,9 +200,10 @@ static void MD5_Final(unsigned char digest[16], MD5_CTX *ctx)
   gcry_md_close(*ctx);
 }
 
-static void SHA1_Init(SHA_CTX *ctx)
+static int SHA1_Init(SHA_CTX *ctx)
 {
   gcry_md_open(ctx, GCRY_MD_SHA1, 0);
+  return 1;
 }
 
 static void SHA1_Update(SHA_CTX *ctx,
@@ -201,9 +219,10 @@ static void SHA1_Final(unsigned char digest[20], SHA_CTX *ctx)
   gcry_md_close(*ctx);
 }
 
-static void SHA256_Init(SHA256_CTX *ctx)
+static int SHA256_Init(SHA256_CTX *ctx)
 {
   gcry_md_open(ctx, GCRY_MD_SHA256, 0);
+  return 1;
 }
 
 static void SHA256_Update(SHA256_CTX *ctx,
@@ -217,6 +236,149 @@ static void SHA256_Final(unsigned char digest[32], SHA256_CTX *ctx)
 {
   memcpy(digest, gcry_md_read(*ctx, 0), 32);
   gcry_md_close(*ctx);
+}
+
+#elif defined(USE_NSS)
+
+static int nss_hash_init(void **pctx, SECOidTag hash_alg)
+{
+  PK11Context *ctx;
+
+  /* we have to initialize NSS if not initialized alraedy */
+  if(!NSS_IsInitialized() && !nss_context) {
+    static NSSInitParameters params;
+    params.length = sizeof params;
+    nss_context = NSS_InitContext("", "", "", "", &params, NSS_INIT_READONLY
+        | NSS_INIT_NOCERTDB   | NSS_INIT_NOMODDB       | NSS_INIT_FORCEOPEN
+        | NSS_INIT_NOROOTINIT | NSS_INIT_OPTIMIZESPACE | NSS_INIT_PK11RELOAD);
+  }
+
+  ctx = PK11_CreateDigestContext(hash_alg);
+  if(!ctx)
+    return /* failure */ 0;
+
+  if(PK11_DigestBegin(ctx) != SECSuccess) {
+    PK11_DestroyContext(ctx, PR_TRUE);
+    return /* failure */ 0;
+  }
+
+  *pctx = ctx;
+  return /* success */ 1;
+}
+
+static void nss_hash_final(void **pctx, unsigned char *out, unsigned int len)
+{
+  PK11Context *ctx = *pctx;
+  unsigned int outlen;
+  PK11_DigestFinal(ctx, out, &outlen, len);
+  PK11_DestroyContext(ctx, PR_TRUE);
+}
+
+static int MD5_Init(MD5_CTX *pctx)
+{
+  return nss_hash_init(pctx, SEC_OID_MD5);
+}
+
+static void MD5_Update(MD5_CTX *pctx,
+                       const unsigned char *input,
+                       unsigned int input_len)
+{
+  PK11_DigestOp(*pctx, input, input_len);
+}
+
+static void MD5_Final(unsigned char digest[16], MD5_CTX *pctx)
+{
+  nss_hash_final(pctx, digest, 16);
+}
+
+static int SHA1_Init(SHA_CTX *pctx)
+{
+  return nss_hash_init(pctx, SEC_OID_SHA1);
+}
+
+static void SHA1_Update(SHA_CTX *pctx,
+                        const unsigned char *input,
+                        unsigned int input_len)
+{
+  PK11_DigestOp(*pctx, input, input_len);
+}
+
+static void SHA1_Final(unsigned char digest[20], SHA_CTX *pctx)
+{
+  nss_hash_final(pctx, digest, 20);
+}
+
+static int SHA256_Init(SHA256_CTX *pctx)
+{
+  return nss_hash_init(pctx, SEC_OID_SHA256);
+}
+
+static void SHA256_Update(SHA256_CTX *pctx,
+                          const unsigned char *input,
+                          unsigned int input_len)
+{
+  PK11_DigestOp(*pctx, input, input_len);
+}
+
+static void SHA256_Final(unsigned char digest[32], SHA256_CTX *pctx)
+{
+  nss_hash_final(pctx, digest, 32);
+}
+
+#elif defined(USE_POLARSSL)
+
+static int MD5_Init(MD5_CTX *ctx)
+{
+  md5_starts(ctx);
+  return 1;
+}
+
+static void MD5_Update(MD5_CTX *ctx,
+                       const unsigned char *input,
+                       unsigned int inputLen)
+{
+  md5_update(ctx, input, inputLen);
+}
+
+static void MD5_Final(unsigned char digest[16], MD5_CTX *ctx)
+{
+  md5_finish(ctx, digest);
+}
+
+static int SHA1_Init(SHA_CTX *ctx)
+{
+  sha1_starts(ctx);
+  return 1;
+}
+
+static void SHA1_Update(SHA_CTX *ctx,
+                        const unsigned char *input,
+                        unsigned int inputLen)
+{
+  sha1_update(ctx, input, inputLen);
+}
+
+static void SHA1_Final(unsigned char digest[20], SHA_CTX *ctx)
+{
+  sha1_finish(ctx, digest);
+}
+
+static int SHA256_Init(SHA256_CTX *ctx)
+{
+  sha256_starts(ctx, 0); /* 0 = sha256 */
+  return 1;
+}
+
+static void SHA256_Update(SHA256_CTX *ctx,
+                          const unsigned char *input,
+                          unsigned int inputLen)
+{
+  sha256_update(ctx, input, inputLen);
+}
+
+static void SHA256_Final(unsigned char digest[32], SHA256_CTX *ctx)
+{
+  sha256_finish(ctx, digest);
 }
 
 #elif defined(_WIN32) && !defined(USE_SSLEAY)
@@ -235,12 +397,13 @@ static void win32_crypto_final(struct win32_crypto_hash *ctx,
     CryptReleaseContext(ctx->hCryptProv, 0);
 }
 
-static void MD5_Init(MD5_CTX *ctx)
+static int MD5_Init(MD5_CTX *ctx)
 {
   if(CryptAcquireContext(&ctx->hCryptProv, NULL, NULL,
                          PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
     CryptCreateHash(ctx->hCryptProv, CALG_MD5, 0, 0, &ctx->hHash);
   }
+  return 1;
 }
 
 static void MD5_Update(MD5_CTX *ctx,
@@ -255,12 +418,13 @@ static void MD5_Final(unsigned char digest[16], MD5_CTX *ctx)
   win32_crypto_final(ctx, digest, 16);
 }
 
-static void SHA1_Init(SHA_CTX *ctx)
+static int SHA1_Init(SHA_CTX *ctx)
 {
   if(CryptAcquireContext(&ctx->hCryptProv, NULL, NULL,
                          PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
     CryptCreateHash(ctx->hCryptProv, CALG_SHA1, 0, 0, &ctx->hHash);
   }
+  return 1;
 }
 
 static void SHA1_Update(SHA_CTX *ctx,
@@ -275,12 +439,13 @@ static void SHA1_Final(unsigned char digest[20], SHA_CTX *ctx)
   win32_crypto_final(ctx, digest, 20);
 }
 
-static void SHA256_Init(SHA256_CTX *ctx)
+static int SHA256_Init(SHA256_CTX *ctx)
 {
   if(CryptAcquireContext(&ctx->hCryptProv, NULL, NULL,
                          PROV_RSA_AES, CRYPT_VERIFYCONTEXT)) {
     CryptCreateHash(ctx->hCryptProv, CALG_SHA_256, 0, 0, &ctx->hHash);
   }
+  return 1;
 }
 
 static void SHA256_Update(SHA256_CTX *ctx,
@@ -374,7 +539,10 @@ digest_context *Curl_digest_init(const digest_params *dparams)
 
   ctxt->digest_hash = dparams;
 
-  dparams->digest_init(ctxt->digest_hashctx);
+  if(dparams->digest_init(ctxt->digest_hashctx) != 1) {
+    free(ctxt);
+    return NULL;
+  }
 
   return ctxt;
 }
@@ -425,6 +593,8 @@ static unsigned char hex_to_uint(const char *s)
  *   Checksum didn't match.
  * -1:
  *   Could not open file; or could not read data from file.
+ * -2:
+ *   Hash algorithm not available.
  */
 static int check_hash(const char *filename,
                       const metalink_digest_def *digest_def,
@@ -446,7 +616,15 @@ static int check_hash(const char *filename,
             digest_def->hash_name, strerror(errno));
     return -1;
   }
+
   dctx = Curl_digest_init(digest_def->dparams);
+  if(!dctx) {
+    fprintf(error, "Metalink: validating (%s) [%s] FAILED (%s)\n", filename,
+            digest_def->hash_name, "failed to initialize hash algorithm");
+    close(fd);
+    return -2;
+  }
+
   result = malloc(digest_def->dparams->digest_resultlen);
   while(1) {
     unsigned char buf[4096];
@@ -479,7 +657,7 @@ static int check_hash(const char *filename,
   return check_ok;
 }
 
-int metalink_check_hash(struct Configurable *config,
+int metalink_check_hash(struct GlobalConfig *config,
                         metalinkfile *mlfile,
                         const char *filename)
 {
@@ -487,8 +665,7 @@ int metalink_check_hash(struct Configurable *config,
   fprintf(config->errors, "Metalink: validating (%s)...\n", filename);
   if(mlfile->checksum == NULL) {
     fprintf(config->errors,
-            "Metalink: validating (%s) FAILED (digest missing)\n",
-            filename);
+            "Metalink: validating (%s) FAILED (digest missing)\n", filename);
     return -2;
   }
   rv = check_hash(filename, mlfile->checksum->digest_def,
@@ -597,7 +774,7 @@ static metalinkfile *new_metalinkfile(metalink_file_t *fileinfo)
   return f;
 }
 
-int parse_metalink(struct Configurable *config, struct OutStruct *outs,
+int parse_metalink(struct OperationConfig *config, struct OutStruct *outs,
                    const char *metalink_url)
 {
   metalink_error_t r;
@@ -612,7 +789,7 @@ int parse_metalink(struct Configurable *config, struct OutStruct *outs,
     return -1;
   }
   if(metalink->files == NULL) {
-    fprintf(config->errors, "Metalink: parsing (%s) WARNING "
+    fprintf(config->global->errors, "Metalink: parsing (%s) WARNING "
             "(missing or invalid file name)\n",
             metalink_url);
     metalink_delete(metalink);
@@ -622,7 +799,7 @@ int parse_metalink(struct Configurable *config, struct OutStruct *outs,
     struct getout *url;
     /* Skip an entry which has no resource. */
     if(!(*files)->resources) {
-      fprintf(config->errors, "Metalink: parsing (%s) WARNING "
+      fprintf(config->global->errors, "Metalink: parsing (%s) WARNING "
               "(missing or invalid resource)\n",
               metalink_url, (*files)->name);
       continue;
@@ -649,8 +826,8 @@ int parse_metalink(struct Configurable *config, struct OutStruct *outs,
       mlfile = new_metalinkfile(*files);
       if(!mlfile->checksum) {
         warnings = TRUE;
-        fprintf(config->errors, "Metalink: parsing (%s) WARNING "
-                "(digest missing)\n",
+        fprintf(config->global->errors,
+                "Metalink: parsing (%s) WARNING (digest missing)\n",
                 metalink_url);
       }
       /* Set name as url */
@@ -676,7 +853,7 @@ size_t metalink_write_cb(void *buffer, size_t sz, size_t nmemb,
                          void *userdata)
 {
   struct OutStruct *outs = userdata;
-  struct Configurable *config = outs->config;
+  struct OperationConfig *config = outs->config;
   int rv;
 
   /*
@@ -694,7 +871,7 @@ size_t metalink_write_cb(void *buffer, size_t sz, size_t nmemb,
   if(rv == 0)
     return sz * nmemb;
   else {
-    fprintf(config->errors, "Metalink: parsing FAILED\n");
+    fprintf(config->global->errors, "Metalink: parsing FAILED\n");
     return failure;
   }
 }
@@ -763,7 +940,7 @@ static void delete_metalinkfile(metalinkfile *mlfile)
   Curl_safefree(mlfile);
 }
 
-void clean_metalink(struct Configurable *config)
+void clean_metalink(struct OperationConfig *config)
 {
   while(config->metalinkfile_list) {
     metalinkfile *mlfile = config->metalinkfile_list;
@@ -771,6 +948,16 @@ void clean_metalink(struct Configurable *config)
     delete_metalinkfile(mlfile);
   }
   config->metalinkfile_last = 0;
+}
+
+void metalink_cleanup(void)
+{
+#ifdef USE_NSS
+  if(nss_context) {
+    NSS_ShutdownContext(nss_context);
+    nss_context = NULL;
+  }
+#endif
 }
 
 #endif /* USE_METALINK */

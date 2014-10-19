@@ -5,7 +5,7 @@
  *                            | (__| |_| |  _ <| |___
  *                             \___|\___/|_| \_\_____|
  *
- * Copyright (C) 2004 - 2012, Daniel Stenberg, <daniel@haxx.se>, et al.
+ * Copyright (C) 2004 - 2014, Daniel Stenberg, <daniel@haxx.se>, et al.
  *
  * This software is licensed as described in the file COPYING, which
  * you should have received as part of this distribution. The terms
@@ -20,7 +20,7 @@
  *
  ***************************************************************************/
 
-#include "setup.h"
+#include "curl_setup.h"
 
 #ifdef HAVE_STRERROR_R
 #  if (!defined(HAVE_POSIX_STRERROR_R) && \
@@ -44,6 +44,9 @@
 #define _MPRINTF_REPLACE /* use our functions only */
 #include <curl/mprintf.h>
 
+#include "curl_memory.h"
+/* The last #include file should be: */
+#include "memdebug.h"
 
 const char *
 curl_easy_strerror(CURLcode error)
@@ -101,6 +104,9 @@ curl_easy_strerror(CURLcode error)
 
   case CURLE_FTP_CANT_GET_HOST:
     return "FTP: can't figure out the host in the PASV response";
+
+  case CURLE_HTTP2:
+    return "Error in the HTTP2 framing layer";
 
   case CURLE_FTP_COULDNT_SET_TYPE:
     return "FTP: couldn't set file type";
@@ -289,8 +295,10 @@ curl_easy_strerror(CURLcode error)
   case CURLE_CHUNK_FAILED:
     return "Chunk callback failed";
 
+  case CURLE_NO_CONNECTION_AVAILABLE:
+    return "The max connection limit is reached";
+
     /* error codes not used by current libcurl */
-  case CURLE_OBSOLETE16:
   case CURLE_OBSOLETE20:
   case CURLE_OBSOLETE24:
   case CURLE_OBSOLETE29:
@@ -354,6 +362,9 @@ curl_multi_strerror(CURLMcode error)
 
   case CURLM_UNKNOWN_OPTION:
     return "Unknown option";
+
+  case CURLM_ADDED_ALREADY:
+    return "The easy handle is already added to a multi handle";
 
   case CURLM_LAST:
     break;
@@ -670,7 +681,7 @@ const char *Curl_strerror(struct connectdata *conn, int err)
 #elif defined(HAVE_STRERROR_R) && defined(HAVE_VXWORKS_STRERROR_R)
  /*
   * The vxworks-style strerror_r() does use the buffer we pass to the function.
-  * The buffer size should be at least MAXERRSTR_SIZE (150) defined in rtsold.h
+  * The buffer size should be at least NAME_MAX (256)
   */
   {
     char buffer[256];

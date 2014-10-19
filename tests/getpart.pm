@@ -56,7 +56,7 @@ sub getpartattr {
             $inside++;
             my $attr=$1;
 
-            while($attr =~ s/ *([^=]*)= *(\"([^\"]*)\"|([^\"> ]*))//) {
+            while($attr =~ s/ *([^=]*)= *(\"([^\"]*)\"|([^\> ]*))//) {
                 my ($var, $cont)=($1, $2);
                 $cont =~ s/^\"(.*)\"$/$1/;
                 $hash{$var}=$cont;
@@ -239,7 +239,7 @@ sub writearray {
 }
 
 #
-# Load a specified file an return it as an array
+# Load a specified file and return it as an array
 #
 sub loadarray {
     my ($filename)=@_;
@@ -264,13 +264,21 @@ sub showdiff {
 
     open(TEMP, ">$file1");
     for(@$firstref) {
-        print TEMP $_;
+        my $l = $_;
+        $l =~ s/\r/[CR]/g;
+        $l =~ s/\n/[LF]/g;
+        print TEMP $l;
+        print TEMP "\n";
     }
     close(TEMP);
 
     open(TEMP, ">$file2");
     for(@$secondref) {
-        print TEMP $_;
+        my $l = $_;
+        $l =~ s/\r/[CR]/g;
+        $l =~ s/\n/[LF]/g;
+        print TEMP $l;
+        print TEMP "\n";
     }
     close(TEMP);
     my @out = `diff -u $file2 $file1 2>/dev/null`;

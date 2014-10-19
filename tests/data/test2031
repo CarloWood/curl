@@ -232,6 +232,10 @@ Finally, this is the real page!
 
 # Client-side
 <client>
+<features>
+NTLM
+!SSPI
+</features>
 <server>
 http
 </server>

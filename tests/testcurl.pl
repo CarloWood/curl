@@ -6,7 +6,7 @@
 #                            | (__| |_| |  _ <| |___
 #                             \___|\___/|_| \_\_____|
 #
-# Copyright (C) 1998 - 2012, Daniel Stenberg, <daniel@haxx.se>, et al.
+# Copyright (C) 1998 - 2014, Daniel Stenberg, <daniel@haxx.se>, et al.
 #
 # This software is licensed as described in the file COPYING, which
 # you should have received as part of this distribution. The terms
@@ -73,7 +73,7 @@ use vars qw($name $email $desc $confopts $runtestopts $setupfile $mktarball
             $timestamp $notes);
 
 # version of this script
-$version='2012-07-02';
+$version='2012-11-30';
 $fixed=0;
 
 # Determine if we're running from git or a canned copy of curl,
@@ -333,6 +333,7 @@ logit "EMAIL = $email";
 logit "DESC = $desc";
 logit "NOTES = $notes";
 logit "CONFOPTS = $confopts";
+logit "RUNTESTOPTS = ".$runtestopts;
 logit "CPPFLAGS = ".$ENV{CPPFLAGS};
 logit "CFLAGS = ".$ENV{CFLAGS};
 logit "LDFLAGS = ".$ENV{LDFLAGS};
@@ -364,7 +365,7 @@ if (-d $CURLDIR) {
     logit "$CURLDIR is verified to be a fine git source dir";
     # remove the generated sources to force them to be re-generated each
     # time we run this test
-    unlink "$CURLDIR/src/hugehelp.c";
+    unlink "$CURLDIR/src/tool_hugehelp.c";
     # find out if curl source dir has an in-tree c-ares repo
     $have_embedded_ares = 1 if (-f "$CURLDIR/ares/GIT-INFO");
   } elsif (!$git && -f "$CURLDIR/tests/testcurl.pl") {
@@ -400,40 +401,54 @@ chdir $CURLDIR;
 
 # Do the git thing, or not...
 if ($git) {
+  my $gitstat = 0;
+  my @commits;
+
   # update quietly to the latest git
   if($nogitpull) {
     logit "skipping git pull (--nogitpull)";
   } else {
-    my $gitstat = 0;
-    my @commits;
     logit "run git pull in curl";
     system("git pull 2>&1");
     $gitstat += $?;
     logit "failed to update from curl git ($?), continue anyway" if ($?);
-    # get the last 5 commits for show (even if no pull was made)
-    @commits=`git log --pretty=oneline --abbrev-commit -5`;
-    logit "The most recent curl git commits:";
-    for (@commits) {
-      chomp ($_);
-      logit "  $_";
-    }
-    if (-d "ares/.git") {
-      chdir "ares";
+
+    # Set timestamp to the UTC the git update took place.
+    $timestamp = scalar(gmtime)." UTC" if (!$gitstat);
+  }
+
+  # get the last 5 commits for show (even if no pull was made)
+  @commits=`git log --pretty=oneline --abbrev-commit -5`;
+  logit "The most recent curl git commits:";
+  for (@commits) {
+    chomp ($_);
+    logit "  $_";
+  }
+
+  if (-d "ares/.git") {
+    chdir "ares";
+
+    if($nogitpull) {
+      logit "skipping git pull (--nogitpull) in ares";
+    } else {
       logit "run git pull in ares";
       system("git pull 2>&1");
       $gitstat += $?;
       logit "failed to update from ares git ($?), continue anyway" if ($?);
-      # get the last 5 commits for show (even if no pull was made)
-      @commits=`git log --pretty=oneline --abbrev-commit -5`;
-      logit "The most recent ares git commits:";
-      for (@commits) {
-        chomp ($_);
-        logit "  $_";
-      }
-      chdir "$pwd/$CURLDIR";
+
+      # Set timestamp to the UTC the git update took place.
+      $timestamp = scalar(gmtime)." UTC" if (!$gitstat);
     }
-    # Set timestamp to the UTC the git update took place.
-    $timestamp = scalar(gmtime)." UTC" if (!$gitstat);
+
+    # get the last 5 commits for show (even if no pull was made)
+    @commits=`git log --pretty=oneline --abbrev-commit -5`;
+    logit "The most recent ares git commits:";
+    for (@commits) {
+      chomp ($_);
+      logit "  $_";
+    }
+
+    chdir "$pwd/$CURLDIR";
   }
 
   if($nobuildconf) {
@@ -702,6 +717,26 @@ if (!$crosscompile || (($extvercmd ne '') && (-x $extvercmd))) {
 }
 
 if ($configurebuild && !$crosscompile) {
+  my $host_triplet = get_host_triplet();
+  # build example programs for selected build targets
+  if(($host_triplet =~ /([^-]+)-([^-]+)-irix(.*)/) ||
+     ($host_triplet =~ /([^-]+)-([^-]+)-aix(.*)/) ||
+     ($host_triplet =~ /([^-]+)-([^-]+)-osf(.*)/) ||
+     ($host_triplet =~ /([^-]+)-([^-]+)-solaris2(.*)/)) {
+    chdir "$pwd/$build/docs/examples";
+    logit_spaced "build examples";
+    open(F, "$make -i 2>&1 |") or die;
+    open(LOG, ">$buildlog") or die;
+    while (<F>) {
+      s/$pwd//g;
+      print;
+      print LOG;
+    }
+    close(F);
+    close(LOG);
+    chdir "$pwd/$build";
+  }
+  # build and run full test suite
   my $o;
   if($runtestopts) {
       $o = "TEST_F=\"$runtestopts\" ";

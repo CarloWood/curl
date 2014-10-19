@@ -5,7 +5,7 @@
  *                            | (__| |_| |  _ <| |___
  *                             \___|\___/|_| \_\_____|
  *
- * Copyright (C) 1998 - 2011, Daniel Stenberg, <daniel@haxx.se>, et al.
+ * Copyright (C) 1998 - 2014, Daniel Stenberg, <daniel@haxx.se>, et al.
  *
  * This software is licensed as described in the file COPYING, which
  * you should have received as part of this distribution. The terms
@@ -20,7 +20,7 @@
  *
  ***************************************************************************/
 
-#include "setup.h"
+#include "curl_setup.h"
 
 #ifdef USE_NTLM
 
@@ -46,7 +46,7 @@
 #include <curl/mprintf.h>
 
 #if defined(USE_NSS)
-#include "nssg.h"
+#include "vtls/nssg.h"
 #elif defined(USE_WINDOWS_SSPI)
 #include "curl_sspi.h"
 #endif
@@ -76,10 +76,6 @@ CURLcode Curl_input_ntlm(struct connectdata *conn,
 #endif
 
   ntlm = proxy ? &conn->proxyntlm : &conn->ntlm;
-
-  /* skip initial whitespaces */
-  while(*header && ISSPACE(*header))
-    header++;
 
   if(checkprefix("NTLM", header)) {
     header += strlen("NTLM");
@@ -181,7 +177,6 @@ CURLcode Curl_output_ntlm(struct connectdata *conn,
     /* Create a type-1 message */
     error = Curl_ntlm_create_type1_message(userp, passwdp, ntlm, &base64,
                                            &len);
-
     if(error)
       return error;
 
@@ -190,8 +185,10 @@ CURLcode Curl_output_ntlm(struct connectdata *conn,
       *allocuserpwd = aprintf("%sAuthorization: NTLM %s\r\n",
                               proxy ? "Proxy-" : "",
                               base64);
-      DEBUG_OUT(fprintf(stderr, "**** Header %s\n ", *allocuserpwd));
       free(base64);
+      if(!*allocuserpwd)
+        return CURLE_OUT_OF_MEMORY;
+      DEBUG_OUT(fprintf(stderr, "**** Header %s\n ", *allocuserpwd));
     }
     break;
 
@@ -207,8 +204,10 @@ CURLcode Curl_output_ntlm(struct connectdata *conn,
       *allocuserpwd = aprintf("%sAuthorization: NTLM %s\r\n",
                               proxy ? "Proxy-" : "",
                               base64);
-      DEBUG_OUT(fprintf(stderr, "**** %s\n ", *allocuserpwd));
       free(base64);
+      if(!*allocuserpwd)
+        return CURLE_OUT_OF_MEMORY;
+      DEBUG_OUT(fprintf(stderr, "**** %s\n ", *allocuserpwd));
 
       ntlm->state = NTLMSTATE_TYPE3; /* we send a type-3 */
       authp->done = TRUE;
@@ -218,10 +217,7 @@ CURLcode Curl_output_ntlm(struct connectdata *conn,
   case NTLMSTATE_TYPE3:
     /* connection is already authenticated,
      * don't send a header in future requests */
-    if(*allocuserpwd) {
-      free(*allocuserpwd);
-      *allocuserpwd = NULL;
-    }
+    Curl_safefree(*allocuserpwd);
     authp->done = TRUE;
     break;
   }
@@ -238,6 +234,14 @@ void Curl_http_ntlm_cleanup(struct connectdata *conn)
   Curl_ntlm_wb_cleanup(conn);
 #else
   (void)conn;
+#endif
+
+#ifndef USE_WINDOWS_SSPI
+  Curl_safefree(conn->ntlm.target_info);
+  conn->ntlm.target_info_len = 0;
+
+  Curl_safefree(conn->proxyntlm.target_info);
+  conn->proxyntlm.target_info_len = 0;
 #endif
 }
 
