@@ -448,7 +448,7 @@ static CURLcode nss_cache_crl(SECItem *crl_der)
     /* CRL already cached */
     SEC_DestroyCrl(crl);
     SECITEM_FreeItem(crl_der, PR_TRUE);
-    return CURLE_SSL_CRL_BADFILE;
+    return CURLE_OK;
   }
 
   /* acquire lock before call of CERT_CacheCRL() and accessing nss_crl_list */
@@ -1345,15 +1345,8 @@ static CURLcode nss_init_sslver(SSLVersionRange *sslver,
   switch (data->set.ssl.version) {
   default:
   case CURL_SSLVERSION_DEFAULT:
-    sslver->min = SSL_LIBRARY_VERSION_3_0;
-    if(data->state.ssl_connect_retry) {
-      infof(data, "TLS disabled due to previous handshake failure\n");
-      sslver->max = SSL_LIBRARY_VERSION_3_0;
-      return CURLE_OK;
-    }
-  /* intentional fall-through to default to highest TLS version if possible */
-
   case CURL_SSLVERSION_TLSv1:
+    sslver->min = SSL_LIBRARY_VERSION_TLS_1_0;
 #ifdef SSL_LIBRARY_VERSION_TLS_1_2
     sslver->max = SSL_LIBRARY_VERSION_TLS_1_2;
 #elif defined SSL_LIBRARY_VERSION_TLS_1_1
@@ -1481,9 +1474,6 @@ static CURLcode nss_setup_connect(struct connectdata *conn, int sockindex)
 #endif
 #endif
 
-
-  if(connssl->state == ssl_connection_complete)
-    return CURLE_OK;
 
   connssl->data = data;
 
@@ -1749,10 +1739,6 @@ static CURLcode nss_do_connect(struct connectdata *conn, int sockindex)
     goto error;
   }
 
-  connssl->state = ssl_connection_complete;
-  conn->recv[sockindex] = nss_recv;
-  conn->send[sockindex] = nss_send;
-
   display_conn_info(conn, connssl->handle);
 
   if(data->set.str[STRING_SSL_ISSUERCERT]) {
@@ -1787,6 +1773,9 @@ static CURLcode nss_connect_common(struct connectdata *conn, int sockindex,
   struct SessionHandle *data = conn->data;
   const bool blocking = (done == NULL);
   CURLcode rv;
+
+  if(connssl->state == ssl_connection_complete)
+    return CURLE_OK;
 
   if(connssl->connecting_state == ssl_connect_1) {
     rv = nss_setup_connect(conn, sockindex);
@@ -1827,7 +1816,12 @@ static CURLcode nss_connect_common(struct connectdata *conn, int sockindex,
     /* signal completed SSL handshake */
     *done = TRUE;
 
-  connssl->connecting_state = ssl_connect_done;
+  connssl->state = ssl_connection_complete;
+  conn->recv[sockindex] = nss_recv;
+  conn->send[sockindex] = nss_send;
+
+  /* ssl_connect_done is never used outside, go back to the initial state */
+  connssl->connecting_state = ssl_connect_1;
   return CURLE_OK;
 }
 

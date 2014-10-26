@@ -37,6 +37,12 @@ use strict;
 use vars qw($opt_b $opt_d $opt_f $opt_h $opt_i $opt_l $opt_n $opt_p $opt_q $opt_s $opt_t $opt_u $opt_v $opt_w);
 use List::Util;
 use Text::Wrap;
+my $MOD_SHA = "Digest::SHA";
+eval "require $MOD_SHA";
+if ($@) {
+  $MOD_SHA = "Digest::SHA::PurePerl";
+  eval "require $MOD_SHA";
+}
 
 my %urls = (
   'nss' =>
@@ -56,7 +62,7 @@ $opt_d = 'release';
 # If the OpenSSL commandline is not in search path you can configure it here!
 my $openssl = 'openssl';
 
-my $version = '1.22';
+my $version = '1.25';
 
 $opt_w = 76; # default base64 encoded lines length
 
@@ -97,7 +103,8 @@ my @valid_signature_algorithms = (
   "MD5",
   "SHA1",
   "SHA256",
-  "SHA512"  
+  "SHA384",
+  "SHA512"
 );
 
 $0 =~ s@.*(/|\\)@@;
@@ -112,29 +119,33 @@ if(!defined($opt_d)) {
 # Use predefined URL or else custom URL specified on command line.
 my $url = ( defined( $urls{$opt_d} ) ) ? $urls{$opt_d} : $opt_d;
 
+my $curl=`curl -V`;
+
 if ($opt_i) {
   print ("=" x 78 . "\n");
-  print "Script Version            : $version\n";
-  print "Perl Version              : $]\n";
-  print "Operating System Name     : $^O\n";
-  print "Getopt::Std.pm Version    : ${Getopt::Std::VERSION}\n";
-  print "MIME::Base64.pm Version   : ${MIME::Base64::VERSION}\n";
-  print "LWP::UserAgent.pm Version : ${LWP::UserAgent::VERSION}\n";
-  print "LWP.pm Version            : ${LWP::VERSION}\n";
+  print "Script Version                   : $version\n";
+  print "Perl Version                     : $]\n";
+  print "Operating System Name            : $^O\n";
+  print "Getopt::Std.pm Version           : ${Getopt::Std::VERSION}\n";
+  print "MIME::Base64.pm Version          : ${MIME::Base64::VERSION}\n";
+  print "LWP::UserAgent.pm Version        : ${LWP::UserAgent::VERSION}\n";
+  print "LWP.pm Version                   : ${LWP::VERSION}\n";
+  print "Digest::SHA.pm Version           : ${Digest::SHA::VERSION}\n" if ($Digest::SHA::VERSION);
+  print "Digest::SHA::PurePerl.pm Version : ${Digest::SHA::PurePerl::VERSION}\n" if ($Digest::SHA::PurePerl::VERSION);
   print ("=" x 78 . "\n");
 }
 
 sub WARNING_MESSAGE() {
   if ( $opt_d =~ m/^risk$/i ) { # Long Form Warning and Exit
     print "Warning: Use of this script may pose some risk:\n";
-	print "\n";
-	print "  1) Using http is subject to man in the middle attack of certdata content\n";
-	print "  2) Default to 'release', but more recent updates may be found in other trees\n";
-	print "  3) certdata.txt file format may change, lag time to update this script\n";
-	print "  4) Generally unwise to blindly trust CAs without manual review & verification\n";
-	print "  5) Mozilla apps use additional security checks aren't represented in certdata\n";
-	print "  6) Use of this script will make a security engineer grind his teeth and\n";
-	print "     swear at you.  ;)\n";
+    print "\n";
+    print "  1) Using http is subject to man in the middle attack of certdata content\n";
+    print "  2) Default to 'release', but more recent updates may be found in other trees\n";
+    print "  3) certdata.txt file format may change, lag time to update this script\n";
+    print "  4) Generally unwise to blindly trust CAs without manual review & verification\n";
+    print "  5) Mozilla apps use additional security checks aren't represented in certdata\n";
+    print "  6) Use of this script will make a security engineer grind his teeth and\n";
+    print "     swear at you.  ;)\n";
     exit;
   } else { # Short Form Warning
     print "Warning: Use of this script may pose some risk, -d risk for more details.\n";
@@ -201,32 +212,39 @@ sub PARSE_CSV_PARAM($$@) {
     print "Error: Invalid ", $description, scalar(@invalid) == 1 ? ": " : "s: ", join( ", ", map { "\"$_\"" } @invalid ), "\n";
     HELP_MESSAGE();
   }
-  
+
   @values = @valid_values if ( IS_IN_LIST("ALL",@values) );
-  
+
   return @values;
 }
 
 sub sha1 {
-    my ($txt)=@_;
-    my $sha1 = `$openssl dgst -sha1 $txt | cut '-d ' -f2`;
-    chomp $sha1;
-    return $sha1;
+  my $result;
+  if ($Digest::SHA::VERSION || $Digest::SHA::PurePerl::VERSION) {
+    open(FILE, $_[0]) or die "Can't open '$_[0]': $!";
+    binmode(FILE);
+    $result = $MOD_SHA->new(1)->addfile(*FILE)->hexdigest;
+    close(FILE);
+  } else {
+    # Use OpenSSL command if Perl Digest::SHA modules not available
+    $result = (split(/ |\r|\n/,`$openssl dgst -sha1 $_[0]`))[1];
+  }
+  return $result;
 }
 
+
 sub oldsha1 {
-    my ($crt)=@_;
-    my $sha1="";
-    open(C, "<$crt");
-    while(<C>) {
-        chomp;
-        if($_ =~ /^\#\# SHA1: (.*)/) {
-            $sha1 = $1;
-            last;
-        }
+  my $sha1 = "";
+  open(C, "<$_[0]") || return 0;
+  while(<C>) {
+    chomp;
+    if($_ =~ /^\#\# SHA1: (.*)/) {
+      $sha1 = $1;
+      last;
     }
-    close(C);
-    return $sha1;
+  }
+  close(C);
+  return $sha1;
 }
 
 if ( $opt_p !~ m/:/ ) {
@@ -242,12 +260,12 @@ my @included_signature_algorithms = PARSE_CSV_PARAM( "signature algorithm", $opt
 
 sub SHOULD_OUTPUT_CERT(%) {
   my %trust_purposes_by_level = @_;
-  
+
   foreach my $level (@included_mozilla_trust_levels) {
     # for each level we want to output, see if any of our desired purposes are included
     return 1 if ( defined( List::Util::first { IS_IN_LIST( $_, @included_mozilla_trust_purposes ) } @{$trust_purposes_by_level{$level}} ) );
   }
-  
+
   return 0;
 }
 
@@ -258,12 +276,26 @@ my $stdout = $crt eq '-';
 my $resp;
 my $fetched;
 
-my $oldsha1= oldsha1($crt);
+my $oldsha1 = oldsha1($crt);
 
-print STDERR "SHA1 of old file: $oldsha1\n";
+print STDERR "SHA1 of old file: $oldsha1\n" if (!$opt_q);
 
-unless ($opt_n and -e $txt) {
-  print STDERR "Downloading '$txt' ...\n" if (!$opt_q);
+print STDERR "Downloading '$txt' ...\n" if (!$opt_q);
+
+if($curl && !$opt_n) {
+  my $https = $url;
+  $https =~ s/^http:/https:/;
+  print STDERR "Get certdata over HTTPS with curl!\n" if (!$opt_q);
+  my $quiet = $opt_q ? "-s" : "";
+  my @out = `curl -w %{response_code} $quiet -O $https`;
+  if(@out && $out[0] == 200) {
+    $fetched = 1;
+  } else {
+    print STDERR "Failed downloading HTTPS with curl, trying HTTP with LWP\n" if (!$opt_q);
+  }
+}
+
+unless ($fetched || ($opt_n and -e $txt)) {
   my $ua  = new LWP::UserAgent(agent => "$0/$version");
   $ua->env_proxy();
   $resp = $ua->mirror($url, $txt);
@@ -281,7 +313,7 @@ unless ($opt_n and -e $txt) {
   }
 }
 
-my $filedate = $fetched ? $resp->last_modified : (stat($txt))[9];
+my $filedate = $resp ? $resp->last_modified : (stat($txt))[9];
 my $datesrc = "as of";
 if(!$filedate) {
     # mxr.mozilla.org gave us a time, hg.mozilla.org does not!
@@ -290,7 +322,7 @@ if(!$filedate) {
 }
 
 # get the hash from the download file
-my $newsha1= sha1($txt); 
+my $newsha1= sha1($txt);
 
 if($oldsha1 eq $newsha1) {
     print STDERR "Downloaded file identical to previous run\'s source file. Exiting\n";

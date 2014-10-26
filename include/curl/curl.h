@@ -521,6 +521,8 @@ typedef enum {
   CURLE_CHUNK_FAILED,            /* 88 - chunk callback reported error */
   CURLE_NO_CONNECTION_AVAILABLE, /* 89 - No connection available, the
                                     session will be queued */
+  CURLE_SSL_PINNEDPUBKEYNOTMATCH, /* 90 - specified pinned public key did not
+                                     match */
   CURL_LAST /* never use! */
 } CURLcode;
 
@@ -1611,6 +1613,10 @@ typedef enum {
   /* Pass in a bitmask of "header options" */
   CINIT(HEADEROPT, LONG, 229),
 
+  /* The public key in DER form used to validate the peer public key
+     this option is used only if SSL_VERIFYPEER is true */
+  CINIT(PINNEDPUBLICKEY, OBJECTPOINT, 230),
+
   CURLOPT_LASTENTRY /* the last unused */
 } CURLoption;
 
@@ -2028,7 +2034,7 @@ typedef enum {
   CURLSSLBACKEND_OPENSSL = 1,
   CURLSSLBACKEND_GNUTLS = 2,
   CURLSSLBACKEND_NSS = 3,
-  CURLSSLBACKEND_QSOSSL = 4,
+  CURLSSLBACKEND_OBSOLETE4 = 4,  /* Was QSOSSL. */
   CURLSSLBACKEND_GSKIT = 5,
   CURLSSLBACKEND_POLARSSL = 6,
   CURLSSLBACKEND_CYASSL = 7,

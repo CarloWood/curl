@@ -749,6 +749,12 @@ int Curl_ossl_init(void)
      calls CONF_modules_load_file() and we use that instead and we ignore
      its return code! */
 
+  /* CONF_MFLAGS_DEFAULT_SECTION introduced some time between 0.9.8b and
+     0.9.8e */
+#ifndef CONF_MFLAGS_DEFAULT_SECTION
+#define CONF_MFLAGS_DEFAULT_SECTION 0x0
+#endif
+
   (void)CONF_modules_load_file(NULL, NULL,
                                CONF_MFLAGS_DEFAULT_SECTION|
                                CONF_MFLAGS_IGNORE_MISSING_FILE);
@@ -1643,16 +1649,6 @@ ossl_connect_step1(struct connectdata *conn,
 #endif
 
   switch(data->set.ssl.version) {
-  case CURL_SSLVERSION_DEFAULT:
-    ctx_options |= SSL_OP_NO_SSLv2;
-#ifdef USE_TLS_SRP
-    if(data->set.ssl.authtype == CURL_TLSAUTH_SRP) {
-      infof(data, "Set version TLSv1.x for SRP authorisation\n");
-      ctx_options |= SSL_OP_NO_SSLv3;
-    }
-#endif
-    break;
-
   case CURL_SSLVERSION_SSLv3:
     ctx_options |= SSL_OP_NO_SSLv2;
     ctx_options |= SSL_OP_NO_TLSv1;
@@ -1662,6 +1658,12 @@ ossl_connect_step1(struct connectdata *conn,
 #endif
     break;
 
+  case CURL_SSLVERSION_DEFAULT:
+#ifdef USE_TLS_SRP
+    if(data->set.ssl.authtype == CURL_TLSAUTH_SRP) {
+      infof(data, "Set version TLSv1.x for SRP authorisation\n");
+    }
+#endif
   case CURL_SSLVERSION_TLSv1:
     ctx_options |= SSL_OP_NO_SSLv2;
     ctx_options |= SSL_OP_NO_SSLv3;
@@ -2357,6 +2359,65 @@ static CURLcode get_cert_chain(struct connectdata *conn,
 }
 
 /*
+ * Heavily modified from:
+ * https://www.owasp.org/index.php/Certificate_and_Public_Key_Pinning#OpenSSL
+ */
+static CURLcode pkp_pin_peer_pubkey(X509* cert, const char *pinnedpubkey)
+{
+  /* Scratch */
+  int len1 = 0, len2 = 0;
+  unsigned char *buff1 = NULL, *temp = NULL;
+
+  /* Result is returned to caller */
+  CURLcode result = CURLE_SSL_PINNEDPUBKEYNOTMATCH;
+
+  /* if a path wasn't specified, don't pin */
+  if(NULL == pinnedpubkey)
+    return CURLE_OK;
+
+  if(NULL == cert)
+    return result;
+
+  do {
+    /* Begin Gyrations to get the subjectPublicKeyInfo     */
+    /* Thanks to Viktor Dukhovni on the OpenSSL mailing list */
+
+    /* http://groups.google.com/group/mailing.openssl.users/browse_thread
+     /thread/d61858dae102c6c7 */
+    len1 = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(cert), NULL);
+    if(len1 < 1)
+      break; /* failed */
+
+    /* http://www.openssl.org/docs/crypto/buffer.html */
+    buff1 = temp = OPENSSL_malloc(len1);
+    if(NULL == buff1)
+      break; /* failed */
+
+    /* http://www.openssl.org/docs/crypto/d2i_X509.html */
+    len2 = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(cert), &temp);
+
+    /*
+     * These checks are verifying we got back the same values as when we
+     * sized the buffer.Its pretty weak since they should always be the
+     * same. But it gives us something to test.
+     */
+    if(len1 != len2 || temp == NULL || ((temp - buff1) != len1))
+      break; /* failed */
+
+    /* End Gyrations */
+
+    /* The one good exit point */
+    result = Curl_pin_peer_pubkey(pinnedpubkey, buff1, len1);
+  } while(0);
+
+  /* http://www.openssl.org/docs/crypto/buffer.html */
+  if(buff1)
+    OPENSSL_free(buff1);
+
+  return result;
+}
+
+/*
  * Get the server cert, verify it and show it etc, only call failf() if the
  * 'strict' argument is TRUE as otherwise all this is for informational
  * purposes only!
@@ -2376,6 +2437,7 @@ static CURLcode servercert(struct connectdata *conn,
   X509 *issuer;
   FILE *fp;
   char *buffer = data->state.buffer;
+  const char *ptr;
 
   if(data->set.ssl.certinfo)
     /* we've been asked to gather certificate info! */
@@ -2477,6 +2539,13 @@ static CURLcode servercert(struct connectdata *conn,
     }
     else
       infof(data, "\t SSL certificate verify ok.\n");
+  }
+
+  ptr = data->set.str[STRING_SSL_PINNEDPUBLICKEY];
+  if(retcode == CURLE_OK && ptr) {
+    retcode = pkp_pin_peer_pubkey(connssl->server_cert, ptr);
+    if(retcode != CURLE_OK)
+      failf(data, "SSL: public key does not match pinned public key!");
   }
 
   X509_free(connssl->server_cert);

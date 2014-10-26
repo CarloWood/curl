@@ -251,7 +251,7 @@ CURLMcode Curl_pipeline_set_site_blacklist(char **sites,
 bool Curl_pipeline_server_blacklisted(struct SessionHandle *handle,
                                       char *server_name)
 {
-  if(handle->multi) {
+  if(handle->multi && server_name) {
     struct curl_llist *blacklist =
       Curl_multi_pipelining_server_bl(handle->multi);
 
@@ -272,7 +272,7 @@ bool Curl_pipeline_server_blacklisted(struct SessionHandle *handle,
       }
     }
 
-    infof(handle, "Server %s is not blacklisted\n", server_name);
+    DEBUGF(infof(handle, "Server %s is not blacklisted\n", server_name));
   }
   return FALSE;
 }
