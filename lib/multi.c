@@ -1014,8 +1014,7 @@ static CURLMcode multi_runsingle(struct Curl_multi *multi,
            doesn't work at this point). */
         connclose(data->easy_conn, "Disconnected with pending data");
         data->result = CURLE_OPERATION_TIMEDOUT;
-        multistate(data, CURLM_STATE_COMPLETED);
-        break;
+        multistate(data, CURLM_STATE_DONE);
       }
     }
 
