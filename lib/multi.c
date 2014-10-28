@@ -1009,13 +1009,17 @@ static CURLMcode multi_runsingle(struct Curl_multi *multi,
           }
         }
 
-        /* Force the connection closed because the server could continue to
+        /* Force the connection closed when the server could continue to
            send us stuff at any time. (The disconnect_conn logic used below
            doesn't work at this point). */
-        connclose(data->easy_conn, "Disconnected with pending data");
+        if(data->multi_do_connection_id == data->easy_conn->connection_id) {
+          connclose(data->easy_conn, "Disconnected with pending data");
+          /* Make sure this connection is no longer considered for
+             pipelining. */
+          data->easy_conn->bits.timedout = TRUE;
+        }
         data->result = CURLE_OPERATION_TIMEDOUT;
-        multistate(data, CURLM_STATE_COMPLETED);
-        break;
+        multistate(data, CURLM_STATE_DONE);
       }
     }
 
@@ -1280,6 +1284,9 @@ static CURLMcode multi_runsingle(struct Curl_multi *multi,
       else {
         /* Perform the protocol's DO action */
         data->result = Curl_do(&data->easy_conn, &dophase_done);
+        /* Remember which connection data was (possibly) sent over */
+        if(data->easy_conn) /* Might have been reset on send error */
+          data->multi_do_connection_id = data->easy_conn->connection_id;
 
         /* When Curl_do() returns failure, data->easy_conn might be NULL! */
 
@@ -2519,6 +2526,8 @@ void Curl_multi_set_easy_connection(struct SessionHandle *handle,
                                     struct connectdata *conn)
 {
   handle->easy_conn = conn;
+  handle->multi_do_connection_id = -1; /* Nothing was sent over this connection
+                                          by this easy handle yet. */
 }
 
 static bool isHandleAtHead(struct SessionHandle *handle,
