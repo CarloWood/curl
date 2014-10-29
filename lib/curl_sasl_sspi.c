@@ -128,6 +128,7 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
   CtxtHandle ctx;
   PSecPkgInfo SecurityPackage;
   SEC_WINNT_AUTH_IDENTITY identity;
+  SEC_WINNT_AUTH_IDENTITY *p_identity;
   SecBuffer chlg_buf;
   SecBuffer resp_buf;
   SecBufferDesc chlg_desc;
@@ -146,13 +147,6 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
   /* Ensure we have a valid challenge message */
   if(!chlg)
     return CURLE_BAD_CONTENT_ENCODING;
-
-  /* Ensure we have some login credentials as DigestSSP cannot use the current
-     Windows user like NTLMSSP can */
-  if(!userp || !*userp) {
-    Curl_safefree(chlg);
-    return CURLE_LOGIN_DENIED;
-  }
 
   /* Query the security package for DigestSSP */
   status = s_pSecFn->QuerySecurityPackageInfo((TCHAR *) TEXT("WDigest"),
@@ -185,30 +179,38 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
     return CURLE_OUT_OF_MEMORY;
   }
 
-  /* Populate our identity structure */
-  result = Curl_create_sspi_identity(userp, passwdp, &identity);
-  if(result) {
-    Curl_safefree(spn);
-    Curl_safefree(resp);
-    Curl_safefree(chlg);
+  if(userp && *userp) {
+    /* Populate our identity structure */
+    result = Curl_create_sspi_identity(userp, passwdp, &identity);
+    if(result) {
+      Curl_safefree(spn);
+      Curl_safefree(resp);
+      Curl_safefree(chlg);
 
-    return result;
+      return result;
+    }
+
+    /* Allow proper cleanup of the identity structure */
+    p_identity = &identity;
   }
+  else
+    /* Use the current Windows user */
+    p_identity = NULL;
 
   /* Acquire our credentials handle */
   status = s_pSecFn->AcquireCredentialsHandle(NULL,
                                               (TCHAR *) TEXT("WDigest"),
                                               SECPKG_CRED_OUTBOUND, NULL,
-                                              &identity, NULL, NULL,
+                                              p_identity, NULL, NULL,
                                               &handle, &expiry);
 
   if(status != SEC_E_OK) {
-    Curl_sspi_free_identity(&identity);
+    Curl_sspi_free_identity(p_identity);
     Curl_safefree(spn);
     Curl_safefree(resp);
     Curl_safefree(chlg);
 
-    return CURLE_OUT_OF_MEMORY;
+    return CURLE_LOGIN_DENIED;
   }
 
   /* Setup the challenge "input" security buffer */
@@ -237,7 +239,7 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
     s_pSecFn->CompleteAuthToken(&handle, &resp_desc);
   else if(status != SEC_E_OK && status != SEC_I_CONTINUE_NEEDED) {
     s_pSecFn->FreeCredentialsHandle(&handle);
-    Curl_sspi_free_identity(&identity);
+    Curl_sspi_free_identity(p_identity);
     Curl_safefree(spn);
     Curl_safefree(resp);
     Curl_safefree(chlg);
@@ -254,7 +256,7 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
   s_pSecFn->FreeCredentialsHandle(&handle);
 
   /* Free the identity structure */
-  Curl_sspi_free_identity(&identity);
+  Curl_sspi_free_identity(p_identity);
 
   /* Free the SPN */
   Curl_safefree(spn);
@@ -262,7 +264,7 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
   /* Free the response buffer */
   Curl_safefree(resp);
 
-  /* Free the decoeded challenge message */
+  /* Free the decoded challenge message */
   Curl_safefree(chlg);
 
   return result;
@@ -365,7 +367,7 @@ CURLcode Curl_sasl_create_gssapi_user_message(struct SessionHandle *data,
                                                 krb5->p_identity, NULL, NULL,
                                                 krb5->credentials, &expiry);
     if(status != SEC_E_OK)
-      return CURLE_OUT_OF_MEMORY;
+      return CURLE_LOGIN_DENIED;
 
     /* Allocate our new context handle */
     krb5->context = malloc(sizeof(CtxtHandle));
