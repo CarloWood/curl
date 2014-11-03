@@ -485,8 +485,7 @@ CURLMcode curl_multi_remove_handle(CURLM *multi_handle,
                                    CURL *curl_handle)
 {
   struct Curl_multi *multi=(struct Curl_multi *)multi_handle;
-  struct SessionHandle *easy = curl_handle;
-  struct SessionHandle *data = easy;
+  struct SessionHandle *data = curl_handle;     /* easy handle */
   bool premature;
   bool easy_owns_conn;
   struct curl_llist_element *e;
@@ -505,7 +504,7 @@ CURLMcode curl_multi_remove_handle(CURLM *multi_handle,
 
 
   premature = (data->mstate < CURLM_STATE_COMPLETED) ? TRUE : FALSE;
-  easy_owns_conn = (data->easy_conn && (data->easy_conn->data == easy)) ?
+  easy_owns_conn = (data->easy_conn && (data->easy_conn->data == data)) ?
     TRUE : FALSE;
 
   /* If the 'state' is not INIT or COMPLETED, we might need to do something
@@ -526,7 +525,7 @@ CURLMcode curl_multi_remove_handle(CURLM *multi_handle,
     connclose(data->easy_conn, "Removed with partial response");
     /* Set connection owner so that Curl_done() closes it.
        We can safely do this here since connection is killed. */
-    data->easy_conn->data = easy;
+    data->easy_conn->data = data;
   }
 
   /* The timer must be shut down before data->multi is set to NULL,
@@ -573,7 +572,7 @@ CURLMcode curl_multi_remove_handle(CURLM *multi_handle,
   /* change state without using multistate(), only to make singlesocket() do
      what we want */
   data->mstate = CURLM_STATE_COMPLETED;
-  singlesocket(multi, easy); /* to let the application know what sockets that
+  singlesocket(multi, data); /* to let the application know what sockets that
                                 vanish with this handle */
 
   /* Remove the association between the connection and the handle */
@@ -590,7 +589,7 @@ CURLMcode curl_multi_remove_handle(CURLM *multi_handle,
   for(e = multi->msglist->head; e; e = e->next) {
     struct Curl_message *msg = e->ptr;
 
-    if(msg->extmsg.easy_handle == easy) {
+    if(msg->extmsg.easy_handle == data) {
       Curl_llist_remove(multi->msglist, e, NULL);
       /* there can only be one from this specific handle */
       break;
@@ -971,7 +970,8 @@ static CURLMcode multi_runsingle(struct Curl_multi *multi,
 
     if(data->easy_conn && data->mstate > CURLM_STATE_CONNECT &&
        data->mstate < CURLM_STATE_COMPLETED)
-      /* Make sure we set the connection's current owner */
+      /* Make sure we set the connection owner to the current handle,
+         a lot of code called from here depends on that. */
       data->easy_conn->data = data;
 
     if(data->easy_conn &&
