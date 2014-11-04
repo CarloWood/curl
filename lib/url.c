@@ -134,6 +134,10 @@ int curl_win32_idn_to_ascii(const char *in, char **out);
 /* The last #include file should be: */
 #include "memdebug.h"
 
+/* Defined in multi.c */
+void Curl_disassociate_conn(struct SessionHandle*, bool reset_owner);
+void Curl_disassociate_socket(struct SessionHandle *data, curl_socket_t s);
+
 /* Local static prototypes */
 static struct connectdata *
 find_oldest_idle_connection(struct SessionHandle *data);
@@ -141,7 +145,8 @@ static struct connectdata *
 find_oldest_idle_connection_in_bundle(struct SessionHandle *data,
                                       struct connectbundle *bundle);
 static void conn_free(struct connectdata *conn);
-static void signalPipeClose(struct curl_llist *pipeline, bool pipe_broke);
+static void signalPipeClose(struct curl_llist *pipeline,
+                            curl_socket_t s, bool pipe_broke);
 static CURLcode do_init(struct connectdata *conn);
 static CURLcode parse_url_login(struct SessionHandle *data,
                                 struct connectdata *conn,
@@ -2647,14 +2652,26 @@ static void conn_free(struct connectdata *conn)
 CURLcode Curl_disconnect(struct connectdata *conn, bool dead_connection)
 {
   struct SessionHandle *data;
+  curl_socket_t s;
+
   if(!conn)
     return CURLE_OK; /* this is closed and fine already */
+
   data = conn->data;
+  s = conn->sock[FIRSTSOCKET];
 
   if(!data) {
     DEBUGF(fprintf(stderr, "DISCONNECT without easy handle, ignoring\n"));
     return CURLE_OK;
   }
+
+  /* Make sure that singlesocket() will never stop handling a socket
+     with fd conn->sock[FIRSTSOCKET] somewhere in the future: it would
+     be a completely new connection that reused the fd! */
+  Curl_disassociate_socket(data, s);
+
+  DEBUGASSERT(!data->easy_conn || data->easy_conn == conn);
+  data->easy_conn = NULL;
 
   if(conn->dns_entry != NULL) {
     Curl_resolv_unlock(data, conn->dns_entry);
@@ -2699,8 +2716,8 @@ CURLcode Curl_disconnect(struct connectdata *conn, bool dead_connection)
 
   /* Indicate to all handles on the pipe that we're dead */
   if(Curl_multi_pipeline_enabled(data->multi)) {
-    signalPipeClose(conn->send_pipe, TRUE);
-    signalPipeClose(conn->recv_pipe, TRUE);
+    signalPipeClose(conn->send_pipe, s, TRUE);
+    signalPipeClose(conn->recv_pipe, s, TRUE);
   }
 
   conn_free(conn);
@@ -2810,7 +2827,8 @@ void Curl_getoff_all_pipelines(struct SessionHandle *data,
     conn->writechannel_inuse = FALSE;
 }
 
-static void signalPipeClose(struct curl_llist *pipeline, bool pipe_broke)
+static void signalPipeClose(struct curl_llist *pipeline,
+                            curl_socket_t s, bool pipe_broke)
 {
   struct curl_llist_element *curr;
 
@@ -2831,6 +2849,7 @@ static void signalPipeClose(struct curl_llist *pipeline, bool pipe_broke)
 
     if(pipe_broke)
       data->state.pipe_broke = TRUE;
+    Curl_disassociate_socket(data, s);
     Curl_multi_handlePipeBreak(data);
     Curl_llist_remove(pipeline, curr, NULL);
     curr = next;
@@ -2956,6 +2975,7 @@ static bool disconnect_if_dead(struct connectdata *conn,
       infof(data, "Connection %ld seems to be dead!\n", conn->connection_id);
 
       /* disconnect resources */
+      data->easy_conn = conn;
       Curl_disconnect(conn, /* dead_connection */TRUE);
       return TRUE;
     }
@@ -3303,7 +3323,9 @@ ConnectionDone(struct SessionHandle *data, struct connectdata *conn)
       conn_candidate->data = data;
 
       /* the winner gets the honour of being disconnected */
+      data->easy_conn = conn_candidate;
       (void)Curl_disconnect(conn_candidate, /* dead_connection */ FALSE);
+      /* Now data->easy_conn == NULL */
     }
   }
 
@@ -5528,6 +5550,8 @@ static CURLcode create_conn(struct SessionHandle *data,
   }
 
   prune_dead_connections(data);
+  /* prune_dead_connections messes with easy_conn, so set it again */
+  *in_connect = conn;
 
   /*************************************************************
    * Check the current list of connections to see if we can
@@ -5541,8 +5565,12 @@ static CURLcode create_conn(struct SessionHandle *data,
      authentication phase). */
   if(data->set.reuse_fresh && !data->state.this_is_a_follow)
     reuse = FALSE;
-  else
+  else {
     reuse = ConnectionExists(data, conn, &conn_temp, &force_reuse);
+    /* ConnectionExists calls disconnect_if_dead which messes
+       with data->easy_conn. Set it again... */
+    *in_connect = conn;
+  }
 
   /* If we found a reusable connection, we may still want to
      open a new connection if we are pipelining. */
@@ -5603,6 +5631,7 @@ static CURLcode create_conn(struct SessionHandle *data,
         /* Set the connection's owner correctly, then kill it */
         conn_candidate->data = data;
         (void)Curl_disconnect(conn_candidate, /* dead_connection */ FALSE);
+        *in_connect = conn;     /* Was reset by Curl_disconnect */
       }
       else
         no_connections_available = TRUE;
@@ -5619,6 +5648,7 @@ static CURLcode create_conn(struct SessionHandle *data,
         /* Set the connection's owner correctly, then kill it */
         conn_candidate->data = data;
         (void)Curl_disconnect(conn_candidate, /* dead_connection */ FALSE);
+        *in_connect = conn;     /* Was reset by Curl_disconnect */
       }
       else
         no_connections_available = TRUE;
@@ -5800,6 +5830,9 @@ CURLcode Curl_connect(struct SessionHandle *data,
      the value on error without worries, if anything goes wrong */
   DEBUGASSERT(*in_connect == NULL);
 
+  /* Required correct ownership */
+  DEBUGASSERT(in_connect == &data->easy_conn);
+
   /* call the stuff that needs to be called */
   result = create_conn(data, in_connect, asyncp);
 
@@ -5828,8 +5861,8 @@ CURLcode Curl_connect(struct SessionHandle *data,
   if(result && *in_connect) {
     /* We're not allowed to return failure with memory left allocated
        in the connectdata struct, free those here */
+    (*in_connect)->data = data;
     Curl_disconnect(*in_connect, FALSE); /* close the connection */
-    *in_connect = NULL;           /* return a NULL */
   }
 
   return result;
@@ -5952,7 +5985,8 @@ CURLcode Curl_done(struct connectdata **connp,
       data->state.lastconnect = NULL;
   }
 
-  /* This is true because we only get here from Curl_reconnect_request
+  /*
+   * This is true because we only get here from Curl_reconnect_request
    * where the exact same assert holds, or from curl_multi_remove_handle
    * which only calls Curl_done when data->easy_conn->data == data, or from
    * multi_runsingle with various states (PROTOCONNECT, DO, DOING, DO_MORE,
@@ -5962,10 +5996,13 @@ CURLcode Curl_done(struct connectdata **connp,
    */
   DEBUGASSERT(connp == &data->easy_conn);
 
-  data->easy_conn = NULL; /* to make the caller of this function better detect
-                             that this was either closed or handed over to the
-                             connection cache here, and therefore cannot be
-                             used from this point on */
+  /*
+   * Call Curl_disassociate_conn() to make the caller of this function better
+   * detect that this was either closed or handed over to the connection
+   * cache here, and therefore cannot be used from this point on
+   */
+  Curl_disassociate_conn(data, FALSE);
+
   Curl_free_request_state(data);
 
   return result;
