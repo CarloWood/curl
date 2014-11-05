@@ -419,7 +419,7 @@ typedef enum {
 #endif
 
 /* Struct used for GSSAPI (Kerberos V5) authentication */
-#if defined(USE_WINDOWS_SSPI)
+#if defined(USE_KRB5)
 struct kerberos5data {
   CredHandle *credentials;
   CtxtHandle *context;
@@ -981,7 +981,7 @@ struct connectdata {
   struct sockaddr_in local_addr;
 #endif
 
-#if defined(USE_WINDOWS_SSPI) /* Consider moving some of the above GSS-API */
+#if defined(USE_KRB5)         /* Consider moving some of the above GSS-API */
   struct kerberos5data krb5;  /* variables into the structure definition, */
 #endif                        /* however, some of them are ftp specific. */
 
@@ -1373,7 +1373,6 @@ enum dupstring {
   STRING_KRB_LEVEL,       /* krb security level */
   STRING_NETRC_FILE,      /* if not NULL, use this instead of trying to find
                              $HOME/.netrc */
-  STRING_COPYPOSTFIELDS,  /* if POST, set the fields' values here */
   STRING_PROXY,           /* proxy to use */
   STRING_SET_RANGE,       /* range, if used */
   STRING_SET_REFERER,     /* custom string for the HTTP referer field */
@@ -1416,7 +1415,15 @@ enum dupstring {
 
   STRING_BEARER,          /* <bearer>, if used */
 
-  /* -- end of strings -- */
+  /* -- end of zero-terminated strings -- */
+
+  STRING_LASTZEROTERMINATED,
+
+  /* -- below this are pointers to binary data that cannot be strdup'ed.
+     Each such pointer must be added manually to Curl_dupset() --- */
+
+  STRING_COPYPOSTFIELDS,  /* if POST, set the fields' values here */
+
   STRING_LAST /* not used, just an end-of-list marker */
 };
 
