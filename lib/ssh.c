@@ -546,6 +546,17 @@ static CURLcode ssh_knownhost(struct connectdata *conn)
       keybit = (keytype == LIBSSH2_HOSTKEY_TYPE_RSA)?
         LIBSSH2_KNOWNHOST_KEY_SSHRSA:LIBSSH2_KNOWNHOST_KEY_SSHDSS;
 
+#ifdef HAVE_LIBSSH2_KNOWNHOST_CHECKP
+      keycheck = libssh2_knownhost_checkp(sshc->kh,
+                                          conn->host.name,
+                                          (conn->remote_port != PORT_SSH)?
+                                          conn->remote_port:-1,
+                                          remotekey, keylen,
+                                          LIBSSH2_KNOWNHOST_TYPE_PLAIN|
+                                          LIBSSH2_KNOWNHOST_KEYENC_RAW|
+                                          keybit,
+                                          &host);
+#else
       keycheck = libssh2_knownhost_check(sshc->kh,
                                          conn->host.name,
                                          remotekey, keylen,
@@ -553,6 +564,7 @@ static CURLcode ssh_knownhost(struct connectdata *conn)
                                          LIBSSH2_KNOWNHOST_KEYENC_RAW|
                                          keybit,
                                          &host);
+#endif
 
       infof(data, "SSH host check: %d, key: %s\n", keycheck,
             (keycheck <= LIBSSH2_KNOWNHOST_CHECK_MISMATCH)?
