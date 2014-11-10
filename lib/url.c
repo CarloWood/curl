@@ -3319,13 +3319,21 @@ ConnectionDone(struct SessionHandle *data, struct connectdata *conn)
     conn_candidate = find_oldest_idle_connection(data);
 
     if(conn_candidate) {
+      /* When disconnecting, conn_candidate needs an owner; use 'data' */
+      struct connectdata *saved_easy_conn = data->easy_conn;
+      bool preserve_easy_conn = saved_easy_conn != conn_candidate;
+      data->easy_conn = conn_candidate;
+
       /* Set the connection's owner correctly */
       conn_candidate->data = data;
 
       /* the winner gets the honour of being disconnected */
-      data->easy_conn = conn_candidate;
       (void)Curl_disconnect(conn_candidate, /* dead_connection */ FALSE);
       /* Now data->easy_conn == NULL */
+
+      /* Restore the easy_conn if needed */
+      if(preserve_easy_conn)
+        data->easy_conn = saved_easy_conn;
     }
   }
 
