@@ -391,6 +391,10 @@ struct curl_ssl_session {
 
 /* Struct used for Digest challenge-response authentication */
 struct digestdata {
+#if defined(USE_WINDOWS_SSPI)
+  BYTE *input_token;
+  size_t input_token_len;
+#else
   char *nonce;
   char *cnonce;
   char *realm;
@@ -400,6 +404,7 @@ struct digestdata {
   char *qop;
   char *algorithm;
   int nc; /* nounce count */
+#endif
 };
 
 typedef enum {
