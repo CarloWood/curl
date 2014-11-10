@@ -37,6 +37,8 @@
 #include "warnless.h"
 #include "curl_memory.h"
 #include "curl_multibyte.h"
+#include "curl_ntlm_msgs.h"
+#include "strdup.h"
 
 #define _MPRINTF_REPLACE /* use our functions only */
 #include <curl/mprintf.h>
@@ -123,11 +125,11 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
   CURLcode result = CURLE_OK;
   TCHAR *spn = NULL;
   size_t chlglen = 0;
-  size_t resp_max = 0;
-  unsigned char *chlg = NULL;
-  unsigned char *resp = NULL;
-  CredHandle handle;
-  CtxtHandle ctx;
+  size_t token_max = 0;
+  unsigned char *input_token = NULL;
+  unsigned char *output_token = NULL;
+  CredHandle credentials;
+  CtxtHandle context;
   PSecPkgInfo SecurityPackage;
   SEC_WINNT_AUTH_IDENTITY identity;
   SEC_WINNT_AUTH_IDENTITY *p_identity;
@@ -141,33 +143,33 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
 
   /* Decode the base-64 encoded challenge message */
   if(strlen(chlg64) && *chlg64 != '=') {
-    result = Curl_base64_decode(chlg64, &chlg, &chlglen);
+    result = Curl_base64_decode(chlg64, &input_token, &chlglen);
     if(result)
       return result;
   }
 
   /* Ensure we have a valid challenge message */
-  if(!chlg)
+  if(!input_token)
     return CURLE_BAD_CONTENT_ENCODING;
 
   /* Query the security package for DigestSSP */
   status = s_pSecFn->QuerySecurityPackageInfo((TCHAR *) TEXT(SP_NAME_DIGEST),
                                               &SecurityPackage);
   if(status != SEC_E_OK) {
-    Curl_safefree(chlg);
+    Curl_safefree(input_token);
 
     return CURLE_NOT_BUILT_IN;
   }
 
-  resp_max = SecurityPackage->cbMaxToken;
+  token_max = SecurityPackage->cbMaxToken;
 
   /* Release the package buffer as it is not required anymore */
   s_pSecFn->FreeContextBuffer(SecurityPackage);
 
   /* Allocate our response buffer */
-  resp = malloc(resp_max);
-  if(!resp) {
-    Curl_safefree(chlg);
+  output_token = malloc(token_max);
+  if(!output_token) {
+    Curl_safefree(input_token);
 
     return CURLE_OUT_OF_MEMORY;
   }
@@ -175,8 +177,8 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
   /* Generate our SPN */
   spn = Curl_sasl_build_spn(service, data->easy_conn->host.name);
   if(!spn) {
-    Curl_safefree(resp);
-    Curl_safefree(chlg);
+    Curl_safefree(output_token);
+    Curl_safefree(input_token);
 
     return CURLE_OUT_OF_MEMORY;
   }
@@ -186,8 +188,8 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
     result = Curl_create_sspi_identity(userp, passwdp, &identity);
     if(result) {
       Curl_safefree(spn);
-      Curl_safefree(resp);
-      Curl_safefree(chlg);
+      Curl_safefree(output_token);
+      Curl_safefree(input_token);
 
       return result;
     }
@@ -204,13 +206,13 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
                                               (TCHAR *) TEXT(SP_NAME_DIGEST),
                                               SECPKG_CRED_OUTBOUND, NULL,
                                               p_identity, NULL, NULL,
-                                              &handle, &expiry);
+                                              &credentials, &expiry);
 
   if(status != SEC_E_OK) {
     Curl_sspi_free_identity(p_identity);
     Curl_safefree(spn);
-    Curl_safefree(resp);
-    Curl_safefree(chlg);
+    Curl_safefree(output_token);
+    Curl_safefree(input_token);
 
     return CURLE_LOGIN_DENIED;
   }
@@ -220,7 +222,7 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
   chlg_desc.cBuffers  = 1;
   chlg_desc.pBuffers  = &chlg_buf;
   chlg_buf.BufferType = SECBUFFER_TOKEN;
-  chlg_buf.pvBuffer   = chlg;
+  chlg_buf.pvBuffer   = input_token;
   chlg_buf.cbBuffer   = curlx_uztoul(chlglen);
 
   /* Setup the response "output" security buffer */
@@ -228,34 +230,35 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
   resp_desc.cBuffers  = 1;
   resp_desc.pBuffers  = &resp_buf;
   resp_buf.BufferType = SECBUFFER_TOKEN;
-  resp_buf.pvBuffer   = resp;
-  resp_buf.cbBuffer   = curlx_uztoul(resp_max);
+  resp_buf.pvBuffer   = output_token;
+  resp_buf.cbBuffer   = curlx_uztoul(token_max);
 
-  /* Generate our challenge-response message */
-  status = s_pSecFn->InitializeSecurityContext(&handle, NULL, spn, 0, 0, 0,
-                                               &chlg_desc, 0, &ctx,
-                                               &resp_desc, &attrs, &expiry);
+  /* Generate our response message */
+  status = s_pSecFn->InitializeSecurityContext(&credentials, NULL, spn,
+                                               0, 0, 0, &chlg_desc, 0,
+                                               &context, &resp_desc, &attrs,
+                                               &expiry);
 
   if(status == SEC_I_COMPLETE_NEEDED ||
      status == SEC_I_COMPLETE_AND_CONTINUE)
-    s_pSecFn->CompleteAuthToken(&handle, &resp_desc);
+    s_pSecFn->CompleteAuthToken(&credentials, &resp_desc);
   else if(status != SEC_E_OK && status != SEC_I_CONTINUE_NEEDED) {
-    s_pSecFn->FreeCredentialsHandle(&handle);
+    s_pSecFn->FreeCredentialsHandle(&credentials);
     Curl_sspi_free_identity(p_identity);
     Curl_safefree(spn);
-    Curl_safefree(resp);
-    Curl_safefree(chlg);
+    Curl_safefree(output_token);
+    Curl_safefree(input_token);
 
     return CURLE_RECV_ERROR;
   }
 
   /* Base64 encode the response */
-  result = Curl_base64_encode(data, (char *)resp, resp_buf.cbBuffer, outptr,
-                              outlen);
+  result = Curl_base64_encode(data, (char *) output_token, resp_buf.cbBuffer,
+                              outptr, outlen);
 
   /* Free our handles */
-  s_pSecFn->DeleteSecurityContext(&ctx);
-  s_pSecFn->FreeCredentialsHandle(&handle);
+  s_pSecFn->DeleteSecurityContext(&context);
+  s_pSecFn->FreeCredentialsHandle(&credentials);
 
   /* Free the identity structure */
   Curl_sspi_free_identity(p_identity);
@@ -264,14 +267,340 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
   Curl_safefree(spn);
 
   /* Free the response buffer */
-  Curl_safefree(resp);
+  Curl_safefree(output_token);
 
   /* Free the decoded challenge message */
-  Curl_safefree(chlg);
+  Curl_safefree(input_token);
 
   return result;
 }
+
+/*
+ * Curl_sasl_decode_digest_http_message()
+ *
+ * This is used to decode a HTTP DIGEST challenge message into the seperate
+ * attributes.
+ *
+ * Parameters:
+ *
+ * chlg    [in]     - Pointer to the challenge message.
+ * digest  [in/out] - The digest data struct being used and modified.
+ *
+ * Returns CURLE_OK on success.
+ */
+CURLcode Curl_sasl_decode_digest_http_message(const char *chlg,
+                                              struct digestdata *digest)
+{
+  size_t chlglen = strlen(chlg);
+
+  /* We had an input token before and we got another one now. This means we
+  provided bad credentials in the previous request. */
+  if(digest->input_token)
+    return CURLE_BAD_CONTENT_ENCODING;
+
+  /* Simply store the challenge for use later */
+  digest->input_token = (BYTE *) Curl_memdup(chlg, chlglen);
+  if(!digest->input_token)
+    return CURLE_OUT_OF_MEMORY;
+
+  digest->input_token_len = chlglen;
+
+  return CURLE_OK;
+}
+
+/*
+ * Curl_sasl_create_digest_http_message()
+ *
+ * This is used to generate a HTTP DIGEST response message ready for sending
+ * to the recipient.
+ *
+ * Parameters:
+ *
+ * data    [in]     - The session handle.
+ * userp   [in]     - The user name.
+ * passdwp [in]     - The user's password.
+ * request [in]     - The HTTP request.
+ * uripath [in]     - The path of the HTTP uri.
+ * digest  [in/out] - The digest data struct being used and modified.
+ * outptr  [in/out] - The address where a pointer to newly allocated memory
+ *                    holding the result will be stored upon completion.
+ * outlen  [out]    - The length of the output message.
+ *
+ * Returns CURLE_OK on success.
+ */
+CURLcode Curl_sasl_create_digest_http_message(struct SessionHandle *data,
+                                              const char *userp,
+                                              const char *passwdp,
+                                              const unsigned char *request,
+                                              const unsigned char *uripath,
+                                              struct digestdata *digest,
+                                              char **outptr, size_t *outlen)
+{
+  size_t token_max;
+  CredHandle credentials;
+  CtxtHandle context;
+  char *resp;
+  BYTE *output_token;
+  PSecPkgInfo SecurityPackage;
+  SEC_WINNT_AUTH_IDENTITY identity;
+  SEC_WINNT_AUTH_IDENTITY *p_identity;
+  SecBuffer chlg_buf[3];
+  SecBuffer resp_buf;
+  SecBufferDesc chlg_desc;
+  SecBufferDesc resp_desc;
+  SECURITY_STATUS status;
+  unsigned long attrs;
+  TimeStamp expiry; /* For Windows 9x compatibility of SSPI calls */
+
+  (void) data;
+
+  /* Query the security package for DigestSSP */
+  status = s_pSecFn->QuerySecurityPackageInfo((TCHAR *) TEXT(SP_NAME_DIGEST),
+                                              &SecurityPackage);
+  if(status != SEC_E_OK)
+    return CURLE_NOT_BUILT_IN;
+
+  token_max = SecurityPackage->cbMaxToken;
+
+  /* Release the package buffer as it is not required anymore */
+  s_pSecFn->FreeContextBuffer(SecurityPackage);
+
+  /* Allocate the output buffer according to the max token size as indicated
+     by the security package */
+  output_token = malloc(token_max);
+  if(!output_token)
+    return CURLE_OUT_OF_MEMORY;
+
+  if(userp && *userp) {
+    /* Populate our identity structure */
+    if(Curl_create_sspi_identity(userp, passwdp, &identity))
+      return CURLE_OUT_OF_MEMORY;
+
+    /* Allow proper cleanup of the identity structure */
+    p_identity = &identity;
+  }
+  else
+    /* Use the current Windows user */
+    p_identity = NULL;
+
+  /* Acquire our credentials handle */
+  status = s_pSecFn->AcquireCredentialsHandle(NULL,
+                                              (TCHAR *) TEXT(SP_NAME_DIGEST),
+                                              SECPKG_CRED_OUTBOUND, NULL,
+                                              p_identity, NULL, NULL,
+                                              &credentials, &expiry);
+  if(status != SEC_E_OK) {
+    Curl_safefree(output_token);
+
+    return CURLE_LOGIN_DENIED;
+  }
+
+  /* Setup the challenge "input" security buffer if present */
+  chlg_desc.ulVersion    = SECBUFFER_VERSION;
+  chlg_desc.cBuffers     = 3;
+  chlg_desc.pBuffers     = chlg_buf;
+  chlg_buf[0].BufferType = SECBUFFER_TOKEN;
+  chlg_buf[0].pvBuffer   = digest->input_token;
+  chlg_buf[0].cbBuffer   = curlx_uztoul(digest->input_token_len);
+  chlg_buf[1].BufferType = SECBUFFER_PKG_PARAMS;
+  chlg_buf[1].pvBuffer   = (void *)request;
+  chlg_buf[1].cbBuffer   = curlx_uztoul(strlen((const char *) request));
+  chlg_buf[2].BufferType = SECBUFFER_PKG_PARAMS;
+  chlg_buf[2].pvBuffer   = NULL;
+  chlg_buf[2].cbBuffer   = 0;
+
+  /* Setup the response "output" security buffer */
+  resp_desc.ulVersion = SECBUFFER_VERSION;
+  resp_desc.cBuffers  = 1;
+  resp_desc.pBuffers  = &resp_buf;
+  resp_buf.BufferType = SECBUFFER_TOKEN;
+  resp_buf.pvBuffer   = output_token;
+  resp_buf.cbBuffer   = curlx_uztoul(token_max);
+
+  /* Generate our reponse message */
+  status = s_pSecFn->InitializeSecurityContext(&credentials, NULL,
+                                               (TCHAR *) uripath,
+                                               ISC_REQ_USE_HTTP_STYLE, 0, 0,
+                                               &chlg_desc, 0, &context,
+                                               &resp_desc, &attrs, &expiry);
+
+  if(status == SEC_I_COMPLETE_NEEDED ||
+     status == SEC_I_COMPLETE_AND_CONTINUE)
+    s_pSecFn->CompleteAuthToken(&credentials, &resp_desc);
+  else if(status != SEC_E_OK && status != SEC_I_CONTINUE_NEEDED) {
+    s_pSecFn->FreeCredentialsHandle(&credentials);
+
+    Curl_safefree(output_token);
+
+    return CURLE_OUT_OF_MEMORY;
+  }
+
+  resp = malloc(resp_buf.cbBuffer + 1);
+  if(!resp) {
+    s_pSecFn->DeleteSecurityContext(&context);
+    s_pSecFn->FreeCredentialsHandle(&credentials);
+
+    Curl_safefree(output_token);
+
+    return CURLE_OUT_OF_MEMORY;
+  }
+
+  /* Copy the generated reponse */
+  memcpy(resp, resp_buf.pvBuffer, resp_buf.cbBuffer);
+  resp[resp_buf.cbBuffer] = 0x00;
+
+  /* Return the response */
+  *outptr = resp;
+  *outlen = resp_buf.cbBuffer;
+
+  /* Free our handles */
+  s_pSecFn->DeleteSecurityContext(&context);
+  s_pSecFn->FreeCredentialsHandle(&credentials);
+
+  /* Free the identity structure */
+  Curl_sspi_free_identity(p_identity);
+
+  /* Free the response buffer */
+  Curl_safefree(output_token);
+
+  return CURLE_OK;
+}
+
+/*
+ * Curl_sasl_digest_cleanup()
+ *
+ * This is used to clean up the digest specific data.
+ *
+ * Parameters:
+ *
+ * digest    [in/out] - The digest data struct being cleaned up.
+ *
+ */
+void Curl_sasl_digest_cleanup(struct digestdata *digest)
+{
+  /* Free the input token */
+  Curl_safefree(digest->input_token);
+
+  /* Reset any variables */
+  digest->input_token_len = 0;
+}
 #endif /* !CURL_DISABLE_CRYPTO_AUTH */
+
+#if defined USE_NTLM
+/*
+* Curl_sasl_create_ntlm_type1_message()
+*
+* This is used to generate an already encoded NTLM type-1 message ready for
+* sending to the recipient.
+*
+* Note: This is a simple wrapper of the NTLM function which means that any
+* SASL based protocols don't have to include the NTLM functions directly.
+*
+* Parameters:
+*
+* userp   [in]     - The user name in the format User or Domain\User.
+* passdwp [in]     - The user's password.
+* ntlm    [in/out] - The ntlm data struct being used and modified.
+* outptr  [in/out] - The address where a pointer to newly allocated memory
+*                    holding the result will be stored upon completion.
+* outlen  [out]    - The length of the output message.
+*
+* Returns CURLE_OK on success.
+*/
+CURLcode Curl_sasl_create_ntlm_type1_message(const char *userp,
+                                             const char *passwdp,
+                                             struct ntlmdata *ntlm,
+                                             char **outptr, size_t *outlen)
+{
+  return Curl_ntlm_create_type1_message(userp, passwdp, ntlm, outptr, outlen);
+}
+
+/*
+* Curl_sasl_decode_ntlm_type2_message()
+*
+* This is used to decode an already encoded NTLM type-2 message.
+*
+* Parameters:
+*
+* data     [in]     - Pointer to session handle.
+* type2msg [in]     - Pointer to the base64 encoded type-2 message.
+* ntlm     [in/out] - The ntlm data struct being used and modified.
+*
+* Returns CURLE_OK on success.
+*/
+CURLcode Curl_sasl_decode_ntlm_type2_message(struct SessionHandle *data,
+                                             const char *type2msg,
+                                             struct ntlmdata *ntlm)
+{
+  return Curl_ntlm_decode_type2_message(data, type2msg, ntlm);
+}
+
+/*
+* Curl_sasl_create_ntlm_type3_message()
+*
+* This is used to generate an already encoded NTLM type-3 message ready for
+* sending to the recipient.
+*
+* Parameters:
+*
+* data    [in]     - Pointer to session handle.
+* userp   [in]     - The user name in the format User or Domain\User.
+* passdwp [in]     - The user's password.
+* ntlm    [in/out] - The ntlm data struct being used and modified.
+* outptr  [in/out] - The address where a pointer to newly allocated memory
+*                    holding the result will be stored upon completion.
+* outlen  [out]    - The length of the output message.
+*
+* Returns CURLE_OK on success.
+*/
+CURLcode Curl_sasl_create_ntlm_type3_message(struct SessionHandle *data,
+                                             const char *userp,
+                                             const char *passwdp,
+                                             struct ntlmdata *ntlm,
+                                             char **outptr, size_t *outlen)
+{
+  return Curl_ntlm_create_type3_message(data, userp, passwdp, ntlm, outptr,
+                                        outlen);
+}
+
+/*
+ * Curl_sasl_ntlm_cleanup()
+ *
+ * This is used to clean up the ntlm specific data.
+ *
+ * Parameters:
+ *
+ * ntlm    [in/out] - The ntlm data struct being cleaned up.
+ *
+ */
+void Curl_sasl_ntlm_cleanup(struct ntlmdata *ntlm)
+{
+  /* Free our security context */
+  if(ntlm->context) {
+    s_pSecFn->DeleteSecurityContext(ntlm->context);
+    free(ntlm->context);
+    ntlm->context = NULL;
+  }
+
+  /* Free our credentials handle */
+  if(ntlm->credentials) {
+    s_pSecFn->FreeCredentialsHandle(ntlm->credentials);
+    free(ntlm->credentials);
+    ntlm->credentials = NULL;
+  }
+
+  /* Free our identity */
+  Curl_sspi_free_identity(ntlm->p_identity);
+  ntlm->p_identity = NULL;
+
+  /* Free the input and output tokens */
+  Curl_safefree(ntlm->input_token);
+  Curl_safefree(ntlm->output_token);
+
+  /* Reset any variables */
+  ntlm->token_max = 0;
+}
+#endif /* USE_NTLM */
 
 #if defined(USE_KRB5)
 /*
