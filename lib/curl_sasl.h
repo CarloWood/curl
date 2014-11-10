@@ -26,7 +26,14 @@
 
 struct SessionHandle;
 struct connectdata;
+
+#if !defined(CURL_DISABLE_CRYPTO_AUTH)
+struct digestdata;
+#endif
+
+#if defined(USE_NTLM)
 struct ntlmdata;
+#endif
 
 #if defined(USE_KRB5)
 struct kerberos5data;
@@ -104,6 +111,22 @@ CURLcode Curl_sasl_create_digest_md5_message(struct SessionHandle *data,
                                              const char *passwdp,
                                              const char *service,
                                              char **outptr, size_t *outlen);
+
+/* This is used to decode a HTTP DIGEST challenge message */
+CURLcode Curl_sasl_decode_digest_http_message(const char *chlg,
+                                              struct digestdata *digest);
+
+/* This is used to generate a HTTP DIGEST response message */
+CURLcode Curl_sasl_create_digest_http_message(struct SessionHandle *data,
+                                              const char *userp,
+                                              const char *passwdp,
+                                              const unsigned char *request,
+                                              const unsigned char *uri,
+                                              struct digestdata *digest,
+                                              char **outptr, size_t *outlen);
+
+/* This is used to clean up the digest specific data */
+void Curl_sasl_digest_cleanup(struct digestdata *digest);
 #endif
 
 #ifdef USE_NTLM
@@ -125,6 +148,9 @@ CURLcode Curl_sasl_create_ntlm_type3_message(struct SessionHandle *data,
                                              const char *passwdp,
                                              struct ntlmdata *ntlm,
                                              char **outptr, size_t *outlen);
+
+/* This is used to clean up the ntlm specific data */
+void Curl_sasl_ntlm_cleanup(struct ntlmdata *ntlm);
 
 #endif /* USE_NTLM */
 
