@@ -2951,6 +2951,35 @@ find_oldest_idle_connection_in_bundle(struct SessionHandle *data,
 }
 
 /*
+ * This function disconnects a connection 'conn' which might
+ * or might not be related to the handle 'data'.
+ *
+ * We can't disconnect a connection without it having an owner,
+ * that would print 'DISCONNECT without easy handle, ignoring'
+ * and not disconnect the connection. Therefore 'data' is to
+ * be used as owner.
+ */
+static void disconnect_using(struct connectdata *conn,
+                             struct SessionHandle *data,
+                             bool dead_connection)
+{
+  struct connectdata *saved_easy_conn = data->easy_conn;
+  bool preserve_easy_conn = saved_easy_conn != conn;
+
+  /* Set the connection/owner relationship correctly */
+  conn->data = data;
+  data->easy_conn = conn;
+
+  /* Disconnect resources */
+  (void)Curl_disconnect(conn, dead_connection);
+  /* Now data->easy_conn == NULL */
+
+  /* Restore the easy_conn if needed */
+  if(preserve_easy_conn)
+    data->easy_conn = saved_easy_conn;
+}
+
+/*
  * This function checks if given connection is dead and disconnects if so.
  * (That also removes it from the connection cache.)
  *
@@ -2972,12 +3001,8 @@ static bool disconnect_if_dead(struct connectdata *conn,
       dead = SocketIsDead(conn->sock[FIRSTSOCKET]);
 
     if(dead) {
-      conn->data = data;
       infof(data, "Connection %ld seems to be dead!\n", conn->connection_id);
-
-      /* disconnect resources */
-      data->easy_conn = conn;
-      Curl_disconnect(conn, /* dead_connection */TRUE);
+      disconnect_using(conn, data, /* dead_connection */TRUE);
       return TRUE;
     }
   }
@@ -3320,21 +3345,7 @@ ConnectionDone(struct SessionHandle *data, struct connectdata *conn)
     conn_candidate = find_oldest_idle_connection(data);
 
     if(conn_candidate) {
-      /* When disconnecting, conn_candidate needs an owner; use 'data' */
-      struct connectdata *saved_easy_conn = data->easy_conn;
-      bool preserve_easy_conn = saved_easy_conn != conn_candidate;
-      data->easy_conn = conn_candidate;
-
-      /* Set the connection's owner correctly */
-      conn_candidate->data = data;
-
-      /* the winner gets the honour of being disconnected */
-      (void)Curl_disconnect(conn_candidate, /* dead_connection */ FALSE);
-      /* Now data->easy_conn == NULL */
-
-      /* Restore the easy_conn if needed */
-      if(preserve_easy_conn)
-        data->easy_conn = saved_easy_conn;
+      disconnect_using(conn_candidate, data, /* dead_connection */ FALSE);
     }
   }
 
@@ -5560,8 +5571,6 @@ static CURLcode create_conn(struct SessionHandle *data,
   }
 
   prune_dead_connections(data);
-  /* prune_dead_connections messes with easy_conn, so set it again */
-  *in_connect = conn;
 
   /*************************************************************
    * Check the current list of connections to see if we can
@@ -5577,9 +5586,6 @@ static CURLcode create_conn(struct SessionHandle *data,
     reuse = FALSE;
   else {
     reuse = ConnectionExists(data, conn, &conn_temp, &force_reuse);
-    /* ConnectionExists calls disconnect_if_dead which messes
-       with data->easy_conn. Set it again... */
-    *in_connect = conn;
   }
 
   /* If we found a reusable connection, we may still want to
@@ -5638,10 +5644,7 @@ static CURLcode create_conn(struct SessionHandle *data,
       conn_candidate = find_oldest_idle_connection_in_bundle(data, bundle);
 
       if(conn_candidate) {
-        /* Set the connection's owner correctly, then kill it */
-        conn_candidate->data = data;
-        (void)Curl_disconnect(conn_candidate, /* dead_connection */ FALSE);
-        *in_connect = conn;     /* Was reset by Curl_disconnect */
+        disconnect_using(conn_candidate, data, /* dead_connection */ FALSE);
       }
       else
         no_connections_available = TRUE;
@@ -5655,10 +5658,7 @@ static CURLcode create_conn(struct SessionHandle *data,
       conn_candidate = find_oldest_idle_connection(data);
 
       if(conn_candidate) {
-        /* Set the connection's owner correctly, then kill it */
-        conn_candidate->data = data;
-        (void)Curl_disconnect(conn_candidate, /* dead_connection */ FALSE);
-        *in_connect = conn;     /* Was reset by Curl_disconnect */
+        disconnect_using(conn_candidate, data, /* dead_connection */ FALSE);
       }
       else
         no_connections_available = TRUE;
