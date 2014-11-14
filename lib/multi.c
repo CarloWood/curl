@@ -507,8 +507,6 @@ CURLMcode curl_multi_remove_handle(CURLM *multi_handle,
 
 
   premature = (data->mstate < CURLM_STATE_COMPLETED) ? TRUE : FALSE;
-  easy_owns_conn = (data->easy_conn && (data->easy_conn->data == data)) ?
-    TRUE : FALSE;
 
   /* If the 'state' is not INIT or COMPLETED, we might need to do something
      nice to put the easy_handle in a good known state when this returns. */
@@ -518,18 +516,18 @@ CURLMcode curl_multi_remove_handle(CURLM *multi_handle,
     multi->num_alive--;
 
   if(data->easy_conn &&
-     (data->easy_conn->send_pipe->size +
-      data->easy_conn->recv_pipe->size > 1) &&
      data->mstate > CURLM_STATE_WAITDO &&
      data->mstate < CURLM_STATE_COMPLETED) {
-    /* If the handle is in a pipeline and has started sending off its
-       request but not received its response yet, we need to close
-       connection. */
+    /* If the handle has started sending off its request but not received
+       its response yet, we need to close connection. */
     connclose(data->easy_conn, "Removed with partial response");
     /* Set connection owner so that Curl_done() closes it.
        We can safely do this here since connection is killed. */
     data->easy_conn->data = data;
   }
+
+  easy_owns_conn = (data->easy_conn && (data->easy_conn->data == data)) ?
+    TRUE : FALSE;
 
   /* The timer must be shut down before data->multi is set to NULL,
      else the timenode will remain in the splay tree after
