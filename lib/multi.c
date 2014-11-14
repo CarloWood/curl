@@ -572,14 +572,15 @@ CURLMcode curl_multi_remove_handle(CURLM *multi_handle,
      since we're not part of that multi handle anymore */
   data->state.conn_cache = NULL;
 
+  /* Remove the association between the connection and the handle, if any.
+     Should be called before calling singlesocket(). */
+  Curl_disassociate_conn(data, TRUE);
+
   /* change state without using multistate(), only to make singlesocket() do
      what we want */
   data->mstate = CURLM_STATE_COMPLETED;
   singlesocket(multi, data); /* to let the application know what sockets that
                                 vanish with this handle */
-
-  /* Remove the association between the connection and the handle */
-  Curl_disassociate_conn(data, TRUE);
 
   data->multi = NULL; /* clear the association to this multi handle */
 
