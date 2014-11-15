@@ -3302,8 +3302,17 @@ CURLcode Curl_http_readwrite_headers(struct SessionHandle *data,
           /* Activate pipelining if needed */
           cb_ptr = conn->bundle;
           if(cb_ptr) {
-            if(!(cb_ptr->policy.flags & CURL_BLACKLISTED))
+            if(!(cb_ptr->policy.flags &
+                 (CURL_SUPPORTS_PIPELINING|CURL_BLACKLISTED))) {
+              struct Curl_multi *multi = data->multi;
               cb_ptr->policy.flags |= CURL_SUPPORTS_PIPELINING;
+              /* Now that we detected pipelining, call the policy callback */
+              if(multi && multi->pipeline_policy_cb)
+                multi->pipeline_policy_cb(conn->host.name,
+                                          conn->remote_port,
+                                          &cb_ptr->policy,
+                                          multi->pipeline_policy_userp);
+            }
           }
         }
 
