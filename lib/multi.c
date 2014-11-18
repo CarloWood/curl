@@ -2299,9 +2299,6 @@ void Curl_multi_closed(struct connectdata *conn, curl_socket_t s)
       Curl_hash_pick(multi->sockhash, (char *)&s, sizeof(s));
 
     if(entry) {
-#ifdef DEBUGBUILD
-      socket_removal_sanity_check(conn->data, entry, entry->action);
-#endif
       if(multi->socket_cb)
         multi->socket_cb(conn->data, s, CURL_POLL_REMOVE,
                          multi->socket_userp,
